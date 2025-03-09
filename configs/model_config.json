@@ -1,0 +1,47 @@
+{
+  "data_preprocessing": {
+    "test_size": 0.2,
+    "random_state": 42
+  },
+  "bpr": {
+    "model": "BPR",
+    "embedding_size": 64,
+    "learning_rate": 0.01,
+    "n_epochs": 100,
+    "batch_size": 2048,
+    "neg_sampling": {
+      "strategy": "full",
+      "distribution": "uniform"
+    }
+  },
+  "content": {
+    "model": "DSSM",
+    "embedding_size": 128,
+    "mlp_hidden_size": [128, 64, 32],
+    "dropout": 0.2,
+    "learning_rate": 0.001,
+    "n_epochs": 100,
+    "batch_size": 1024,
+    "categorical_features": ["category", "style"],
+    "numerical_features": ["embedding_vector"]
+  },
+  "catboost": {
+    "iterations": 500,
+    "learning_rate": 0.1,
+    "loss_function": "YetiRank",
+    "custom_metric": ["NDCG:top=10", "PrecisionAt:top=10"],
+    "early_stopping_rounds": 50,
+    "verbose": 100
+  },
+  "content_features": {
+    "tfidf": {
+      "max_features": 1000,
+      "ngram_range": [1, 2],
+      "min_df": 2,
+      "max_df": 0.8
+    }
+  },
+  "hybrid_recommender": {
+    "default_k": 10
+  }
+}
