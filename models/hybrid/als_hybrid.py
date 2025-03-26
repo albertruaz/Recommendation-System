@@ -1,32 +1,34 @@
 """
-가중치 기반 하이브리드 추천 모델
+ALS 기반 하이브리드 추천 모델
 
-협업 필터링(BPR)과 콘텐츠 기반(TF-IDF) 추천의 
-결과를 가중 결합하는 하이브리드 모델입니다.
+ALS 모델과 콘텐츠 기반 추천의 결과를 결합하는 하이브리드 모델입니다.
 """
 
 import numpy as np
 import pandas as pd
+import logging
 from typing import List, Tuple, Dict
 from models.base.base_recommender import BaseRecommender
-from models.collaborative.bpr import BPRModel
 from models.content.tfidf import TFIDFModel
+from utils.als_connector import get_relationship_weights
 
-
-class WeightedHybridModel(BaseRecommender):
-    """가중치 기반 하이브리드 추천 모델"""
+class ALSHybridModel(BaseRecommender):
+    """ALS 기반 하이브리드 추천 모델"""
     
-    def __init__(self, cf_weight: float = 0.7):
+    def __init__(self, als_weight: float = 0.7, config_dict=None):
         """
         Args:
-            cf_weight (float): 협업 필터링 모델의 가중치 (0~1)
+            als_weight (float): ALS 모델의 가중치 (0~1)
+            config_dict (dict, optional): 모델 설정
         """
         super().__init__()
-        self.cf_weight = cf_weight
-        self.content_weight = 1 - cf_weight
+        self.config = config_dict or {}
+        self.als_weight = als_weight
+        self.content_weight = 1 - als_weight
         
-        self.cf_model = BPRModel()
+        # 콘텐츠 기반 모델 초기화
         self.content_model = TFIDFModel()
+        self.is_trained = False
         
     def train(self, ratings: pd.DataFrame, items: pd.DataFrame,
               validation_data: pd.DataFrame = None) -> None:
@@ -37,16 +39,17 @@ class WeightedHybridModel(BaseRecommender):
             items (pd.DataFrame): 아이템 특징 데이터
             validation_data (pd.DataFrame, optional): 검증 데이터
         """
-        # 협업 필터링 모델 학습
-        self.cf_model.train(ratings)
-        
         # 콘텐츠 기반 모델 학습
+        logging.info("콘텐츠 기반 모델 학습 중...")
         self.content_model.train(items)
+        
+        # ALS 모델은 utils.als_connector를 통해 접근하므로 여기서 학습하지 않음
         
         if validation_data is not None:
             self._optimize_weights(validation_data)
             
         self.is_trained = True
+        logging.info("하이브리드 모델 학습 완료")
         
     def _optimize_weights(self, validation_data: pd.DataFrame):
         """검증 데이터를 사용해 최적의 가중치 탐색
@@ -55,15 +58,15 @@ class WeightedHybridModel(BaseRecommender):
             validation_data (pd.DataFrame): 검증 데이터
         """
         best_ndcg = 0
-        best_weight = self.cf_weight
+        best_weight = self.als_weight
         
         for weight in np.arange(0.1, 1.0, 0.1):
-            self.cf_weight = weight
+            self.als_weight = weight
             self.content_weight = 1 - weight
             
             # 검증 데이터로 성능 평가
             ndcg_scores = []
-            for user_id in validation_data['user_id'].unique():
+            for user_id in validation_data['user_id'].unique()[:20]:  # 일부만 사용
                 true_items = validation_data[
                     validation_data['user_id'] == user_id
                 ]['item_id'].tolist()
@@ -81,8 +84,9 @@ class WeightedHybridModel(BaseRecommender):
                 best_ndcg = avg_ndcg
                 best_weight = weight
         
-        self.cf_weight = best_weight
+        self.als_weight = best_weight
         self.content_weight = 1 - best_weight
+        logging.info(f"최적 가중치 - ALS: {self.als_weight:.2f}, 콘텐츠: {self.content_weight:.2f}")
     
     def _calculate_ndcg(self, relevance: List[int], k: int = 10) -> float:
         """NDCG 계산
@@ -111,29 +115,19 @@ class WeightedHybridModel(BaseRecommender):
         if not self.is_trained:
             raise RuntimeError("모델이 학습되지 않았습니다.")
         
-        # 협업 필터링 추천
-        cf_recs = self.cf_model.get_recommendations(user_id, k=k)
-        cf_scores = {item_id: score for item_id, score in cf_recs}
-        
         # 콘텐츠 기반 추천 (최근 상호작용한 아이템 기반)
-        content_scores = {}
-        for item_id in cf_scores.keys():
-            content_recs = self.content_model.get_recommendations(item_id, k=k)
-            for rec_item_id, score in content_recs:
-                if rec_item_id not in content_scores:
-                    content_scores[rec_item_id] = score
-                else:
-                    content_scores[rec_item_id] = max(content_scores[rec_item_id], score)
+        content_recs = self.content_model.get_recommendations(user_id, k=k*2)
+        content_items = [item_id for item_id, _ in content_recs]
+        
+        # ALS 관계 가중치 계산
+        als_weights = get_relationship_weights(user_id, content_items)
         
         # 점수 결합
         final_scores = {}
-        all_items = set(cf_scores.keys()) | set(content_scores.keys())
-        
-        for item_id in all_items:
-            cf_score = cf_scores.get(item_id, 0)
-            content_score = content_scores.get(item_id, 0)
+        for item_id, content_score in content_recs:
+            als_score = als_weights.get(item_id, 0)
             final_scores[item_id] = (
-                self.cf_weight * cf_score + 
+                self.als_weight * als_score + 
                 self.content_weight * content_score
             )
         
@@ -146,15 +140,35 @@ class WeightedHybridModel(BaseRecommender):
     
     def save_model(self, path: str) -> None:
         """모델 저장"""
-        self.cf_model.save_model(f"{path}_cf")
+        import os
+        import joblib
+        
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        
+        # 콘텐츠 모델 저장
         self.content_model.save_model(f"{path}_content")
-        np.save(f"{path}_weights", [self.cf_weight, self.content_weight])
+        
+        # 가중치 저장
+        save_dict = {
+            'als_weight': self.als_weight,
+            'content_weight': self.content_weight,
+            'is_trained': self.is_trained
+        }
+        joblib.dump(save_dict, f"{path}_weights")
+        
+        logging.info(f"하이브리드 모델 저장 완료: {path}")
         
     def load_model(self, path: str) -> None:
         """모델 로드"""
-        self.cf_model.load_model(f"{path}_cf")
+        import joblib
+        
+        # 콘텐츠 모델 로드
         self.content_model.load_model(f"{path}_content")
-        weights = np.load(f"{path}_weights.npy")
-        self.cf_weight = float(weights[0])
-        self.content_weight = float(weights[1])
-        self.is_trained = True 
+        
+        # 가중치 로드
+        save_dict = joblib.load(f"{path}_weights")
+        self.als_weight = save_dict['als_weight']
+        self.content_weight = save_dict['content_weight']
+        self.is_trained = save_dict['is_trained']
+        
+        logging.info(f"하이브리드 모델 로드 완료: {path}") 

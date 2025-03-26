@@ -1,3 +1,4 @@
-from .recbole_dssm import ContentBasedModel
+from .tfidf import TFIDFModel
+from .dssm import DSSMModel
 
-__all__ = ['ContentBasedModel'] 
+__all__ = ['TFIDFModel', 'DSSMModel'] 

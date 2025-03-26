@@ -1,3 +1,4 @@
-from .recbole_bpr import BPRModel
+from .als import ALSModel
+from .bpr import BPRModel
 
-__all__ = ['BPRModel'] 
+__all__ = ['ALSModel', 'BPRModel'] 
