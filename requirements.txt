@@ -1,24 +1,17 @@
-recbole>=1.0.0
-catboost>=1.0.0
-torch>=1.7.0
-pandas>=1.3.0
-numpy>=1.21.0
-scikit-learn>=0.24.2
-tqdm>=4.50.0
-joblib>=1.0.0
-matplotlib>=3.3.0
-seaborn>=0.11.0
-implicit>=0.6.0
-sqlalchemy>=1.4.0
-pymysql>=1.0.2
-psycopg2-binary>=2.9.1
-sshtunnel>=0.4.0
-python-dotenv>=0.19.0
-mysql-connector-python>=8.0.26
-pytest>=6.2.5
-pytest-cov>=2.12.1
-black>=21.7b0
-flake8>=3.9.2
-mypy>=0.910
-isort>=5.9.3
-python-json-logger>=2.0.2 
+# 기본 데이터 처리
+pandas>=2.2.0
+numpy>=1.26.0
+
+# 추천 시스템
+implicit>=0.7.0
+scipy>=1.15.0
+
+# 데이터베이스
+mysql-connector-python>=9.2.0
+PyMySQL>=1.1.0
+SQLAlchemy>=2.0.0
+
+# 유틸리티
+python-dotenv>=1.0.0
+python-json-logger>=3.3.0
+colorlog>=4.7.0 

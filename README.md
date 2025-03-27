@@ -1,143 +1,120 @@
-# ALS 기반 추천 시스템
+# Implicit ALS 기반 추천 시스템
 
-PySpark의 ALS(Alternating Least Squares) 알고리즘을 사용한 사용자-상품 추천 시스템입니다.
+이 프로젝트는 Implicit ALS(Alternating Least Squares) 알고리즘을 사용하여 사용자-상품 추천을 생성하는 시스템입니다.
+
+## 주요 기능
+
+- 사용자-상품 상호작용 데이터를 기반으로 한 추천 생성
+- 다양한 상호작용 타입(조회, 좋아요, 장바구니 등)에 대한 가중치 적용
+- 상호작용 빈도와 타입을 고려한 신뢰도 점수 계산
+- 대규모 사용자-상품 데이터 처리 지원
+
+## 시스템 요구사항
+
+- Python 3.8 이상
+- MySQL 데이터베이스
 
 ## 설치 방법
 
+1. 저장소 클론
+
 ```bash
-# 가상환경 생성 및 패키지 설치
-python -m venv recsys && \
-source recsys/bin/activate && \
-pip install -r requirements.txt && \
-pip install findspark pyarrow==14.0.1
+git clone [repository_url]
+cd recommendation
+```
+
+2. 가상환경 생성 및 활성화
+
+```bash
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+venv\Scripts\activate  # Windows
+```
+
+3. 필요한 패키지 설치
+
+```bash
+pip install -r requirements.txt
+```
+
+4. 환경 변수 설정
+   `.env` 파일을 생성하고 다음 내용을 설정:
+
+```
+# 데이터베이스 설정
+DB_HOST=your_host
+DB_PORT=your_port
+DB_USER=your_user
+DB_PASSWORD=your_password
+DB_NAME=your_database
 ```
 
 ## 사용 방법
+
+기본 실행:
+
+```bash
+python main_als.py
+```
+
+옵션 지정:
 
 ```bash
 python main_als.py --days 30 --top_n 300 --output_dir output --verbose
 ```
 
-### 매개변수 설명
+### 주요 매개변수
 
 - `--days`: 최근 몇 일간의 데이터를 사용할지 지정 (기본값: 30)
 - `--top_n`: 각 사용자에게 추천할 상품 수 (기본값: 300)
 - `--output_dir`: 결과를 저장할 디렉토리 (기본값: output)
 - `--verbose`: 상세 로깅 활성화
 
-## 모델 설정
+## 프로젝트 구조
 
-### 데이터베이스 설정 (configs/model_config.json)
-
-```json
-{
-  "data_preprocessing": {
-    "test_size": 0.2,
-    "random_state": 42,
-    "default_days": 30
-  },
-  "rating_rules": {
-    "purchase": {
-      "value": 5.0,
-      "threshold": 1
-    },
-    "cart": {
-      "value": 4.0,
-      "threshold": 1
-    },
-    "like": {
-      "value": 3.0,
-      "threshold": 1
-    },
-    "view": {
-      "value": 2.0,
-      "threshold": 3
-    },
-    "impression": {
-      "value": 1.0,
-      "threshold": 5
-    }
-  },
-  "filter_conditions": {
-    "min_interactions": 10,
-    "required_actions": ["view", "impression"]
-  }
-}
+```
+recommendation/
+├── config/
+│   └── rating_weights.py     # 상호작용 가중치 설정
+├── database/
+│   ├── db_connector.py       # 데이터베이스 연결 관리
+│   └── recommendation_db.py  # 추천 관련 데이터베이스 쿼리
+├── models/
+│   └── als.py               # ALS 추천 시스템 구현
+├── utils/
+│   ├── __init__.py
+│   ├── config.py            # 설정 파일 관리
+│   └── logger.py            # 로깅 설정
+├── output/                   # 추천 결과 저장 디렉토리
+├── logs/                     # 로그 파일 디렉토리
+├── .env                      # 환경 변수 설정
+├── .gitignore
+├── main_als.py              # 메인 실행 스크립트
+└── requirements.txt         # 필요한 패키지 목록
 ```
 
-### ALS 모델 설정
+## 상호작용 가중치
 
-- `max_iter (int)`: 최대 반복 횟수 (기본값: 15)
+상호작용 타입별 가중치는 `config/rating_weights.py`에 정의되어 있습니다:
 
-  - ALS 알고리즘의 반복 횟수를 지정합니다.
-  - 값이 클수록 더 정확한 결과를 얻을 수 있지만, 학습 시간이 증가합니다.
+- 조회 (view)
+  - view_type_1: 3.0 (3회 이상 조회)
+  - view_type_2: 2.0 (1회 이상 조회)
+  - view_type_3: 1.0 (단순 노출)
+- 좋아요 (like): 4.0
+- 장바구니 (cart): 5.0
+- 구매 (purchase): 10.0
+- 리뷰 (review): 8.0
 
-- `reg_param (float)`: 정규화 파라미터 (기본값: 0.1)
+## 로깅
 
-  - 과적합을 방지하기 위한 정규화 강도를 조절합니다.
-  - 값이 클수록 모델이 더 단순해지고, 작을수록 더 복잡한 패턴을 학습합니다.
+로그는 `logs` 디렉토리에 저장되며, 다음 정보를 포함합니다:
 
-- `rank (int)`: 잠재 요인 개수 (기본값: 10)
+- 데이터베이스 연결/쿼리 실행
+- 모델 학습 과정
+- 추천 생성 과정
+- 오류 및 예외 상황
 
-  - 사용자와 상품을 표현하는 잠재 벡터의 차원을 지정합니다.
-  - 값이 클수록 더 복잡한 관계를 표현할 수 있지만, 과적합의 위험이 증가합니다.
+## 라이선스
 
-- `cold_start_strategy (str)`: 콜드 스타트 처리 전략 (기본값: "drop")
-  - 새로운 사용자나 상품에 대한 처리 방법을 지정합니다.
-  - "drop": 학습 데이터에 없는 사용자/상품은 무시합니다.
-  - "nan": 예측값을 NaN으로 설정합니다.
-
-## 코드 설명
-
-### main_als.py
-
-- `get_data_from_db(days: int)`:
-
-  - 데이터베이스에서 최근 N일간의 사용자-상품 상호작용 데이터를 가져옵니다.
-  - 상호작용이 없는 경우 예외를 발생시킵니다.
-
-- `generate_recommendations(interactions_df: pd.DataFrame, top_n: int)`:
-
-  - ALS 모델을 초기화하고 학습시킨 후 추천을 생성합니다.
-  - RMSE 점수를 출력하고 추천 결과를 반환합니다.
-  - 리소스 정리를 보장하기 위해 finally 블록에서 cleanup을 수행합니다.
-
-- `main()`:
-  - 커맨드 라인 인자를 파싱하고 로깅을 설정합니다.
-  - 데이터를 가져오고 추천을 생성한 후 결과를 저장합니다.
-  - 오류 처리와 상세한 로깅을 제공합니다.
-
-### models/als.py (ALSRecommender 클래스)
-
-- `__init__()`:
-
-  - ALS 모델의 하이퍼파라미터를 초기화합니다.
-  - SparkSession과 모델 인스턴스를 None으로 초기화합니다.
-
-- `_initialize_spark()`:
-
-  - SparkSession을 생성하고 메모리 설정을 구성합니다.
-  - 로그 레벨을 ERROR로 설정하여 불필요한 출력을 제한합니다.
-
-- `_prepare_data(interactions_df: pd.DataFrame)`:
-
-  - 입력 데이터를 SparkDataFrame으로 변환합니다.
-  - 학습/테스트 세트로 분할합니다. (8:2 비율)
-
-- `train(interactions_df: pd.DataFrame)`:
-
-  - ALS 모델을 학습시키고 RMSE 점수를 계산합니다.
-  - 학습된 모델을 인스턴스 변수로 저장합니다.
-
-- `generate_recommendations(top_n: int)`:
-
-  - 학습된 모델을 사용하여 모든 사용자에 대한 추천을 생성합니다.
-  - 결과를 평탄화하고 pandas DataFrame으로 변환합니다.
-
-- `cleanup()`:
-  - SparkSession을 종료하고 모델 인스턴스를 정리합니다.
-  - 메모리 누수를 방지합니다.
-
-## License
-
-MIT License
+이 프로젝트는 MIT 라이선스를 따릅니다.

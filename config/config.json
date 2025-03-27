@@ -1,0 +1,31 @@
+{
+  "interaction_weights": {
+    "view_type_1": 3.0,
+    "view_type_2": 2.0,
+    "view_type_3": 1.0,
+    "like": 5.0,
+    "cart": 10.0,
+    "purchase": 13.0,
+    "review": 15.0
+  },
+  "alpha": 40.0,
+  "min_interactions": {
+    "view": 1,
+    "like": 1,
+    "cart": 1,
+    "purchase": 1,
+    "review": 1
+  },
+  "als_params": {
+    "max_iter": 15,
+    "reg_param": 0.1,
+    "rank": 10,
+    "cold_start_strategy": "drop"
+  },
+  "default_params": {
+    "days": 30,
+    "top_n": 300,
+    "output_dir": "output",
+    "verbose": false
+  }
+}

@@ -5,10 +5,9 @@
 import os
 from typing import Optional
 from contextlib import contextmanager
-import logging
 import mysql.connector
 from mysql.connector import pooling
-from sqlalchemy import create_engine, Engine
+from sqlalchemy import create_engine, Engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 from sshtunnel import SSHTunnelForwarder
@@ -19,7 +18,6 @@ class DBConnector:
     
     def __init__(self):
         load_dotenv()
-        self.logger = logging.getLogger(__name__)
         self._engine: Optional[Engine] = None
         self._Session = None
         self._tunnel: Optional[SSHTunnelForwarder] = None
@@ -52,7 +50,6 @@ class DBConnector:
         """SSH 터널을 설정합니다."""
         try:
             if self._tunnel is None or not self._tunnel.is_active:
-                self.logger.info("SSH 터널 설정 시작")
                 self._tunnel = SSHTunnelForwarder(
                     (self.ssh_config['ssh_host'], 22),
                     ssh_username=self.ssh_config['ssh_username'],
@@ -61,10 +58,8 @@ class DBConnector:
                     local_bind_address=('127.0.0.1', 0)  # 동적 로컬 포트 할당
                 )
                 self._tunnel.start()
-                self.logger.info(f"SSH 터널 설정 완료 (로컬 포트: {self._tunnel.local_bind_port})")
         except Exception as e:
-            self.logger.error(f"SSH 터널 설정 실패: {str(e)}")
-            raise
+            raise Exception(f"SSH 터널 설정 실패: {str(e)}")
     
     def _setup_engine(self) -> None:
         """SQLAlchemy 엔진을 설정합니다."""
@@ -90,13 +85,10 @@ class DBConnector:
             # 세션 팩토리 생성
             self._Session = sessionmaker(bind=self._engine)
             
-            self.logger.info("데이터베이스 엔진 설정 완료")
-            
         except Exception as e:
-            self.logger.error(f"데이터베이스 엔진 설정 실패: {str(e)}")
             if self._tunnel and self._tunnel.is_active:
                 self._tunnel.close()
-            raise
+            raise Exception(f"데이터베이스 엔진 설정 실패: {str(e)}")
     
     @contextmanager
     def get_connection(self):
@@ -144,8 +136,6 @@ class DBConnector:
         if self._tunnel and self._tunnel.is_active:
             self._tunnel.close()
             self._tunnel = None
-            
-        self.logger.info("데이터베이스 연결 및 SSH 터널 정리 완료")
 
     def get_s3_url(self, file_name: str) -> str:
         """S3(또는 CloudFront) 경로 생성"""
@@ -233,11 +223,20 @@ class DBConnector:
         session = self._Session()
         try:
             sql = text("""
-                SELECT link
+                SELECT 
+                    id,
+                    main_image
                 FROM product
                 WHERE id = :product_id
             """)
-            results = session.execute(sql, {"product_id": product_id}).fetchall()
-            return [row[0] for row in results if row[0]]
+            result = session.execute(sql, {'product_id': product_id})
+            
+            products = []
+            for row in result.fetchall():
+                products.append((
+                    row[0],  # id
+                    self.get_s3_url(row[1]) if row[1] else None,  # main_image -> S3 URL
+                ))
+            return products
         finally:
             session.close()
