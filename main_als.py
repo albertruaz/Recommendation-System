@@ -1,7 +1,7 @@
 """
 ALS 기반 추천 시스템 실행 스크립트
 
-이 스크립트는 PySpark ALS를 사용하여 전체 사용자-상품 추천을 생성합니다.
+이 스크립트는 Implicit ALS를 사용하여 전체 사용자-상품 추천을 생성합니다.
 """
 
 import os
@@ -42,7 +42,7 @@ def get_data_from_db(days: int = 30) -> pd.DataFrame:
 
 def generate_recommendations(interactions_df: pd.DataFrame, top_n: int = 300) -> pd.DataFrame:
     """
-    PySpark ALS를 사용하여 전체 사용자에 대한 추천을 생성합니다.
+    Implicit ALS를 사용하여 전체 사용자에 대한 추천을 생성합니다.
     """
     recommender = None
     try:
@@ -63,8 +63,8 @@ def generate_recommendations(interactions_df: pd.DataFrame, top_n: int = 300) ->
         return recommendations_df
         
     except Exception as e:
-        logging.error(f"PySpark ALS 추천 생성 실패: {str(e)}")
-        raise Exception(f"PySpark ALS 오류: {str(e)}")
+        logging.error(f"Implicit ALS 추천 생성 실패: {str(e)}")
+        raise Exception(f"Implicit ALS 오류: {str(e)}")
     
     finally:
         if recommender is not None:
@@ -96,7 +96,7 @@ def main():
         print(f"고유 상품 수: {interactions_df['product_id'].nunique()}")
         
         # 추천 생성
-        print("\n=== PySpark ALS 모델로 추천 생성 시작 ===")
+        print("\n=== Implicit ALS 모델로 추천 생성 시작 ===")
         recommendations_df = generate_recommendations(
             interactions_df=interactions_df,
             top_n=args.top_n
