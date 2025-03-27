@@ -27,191 +27,113 @@ class RecommendationDB:
         self.config = load_config()
     
     def _build_cte_queries(self, start_date: str) -> Dict[str, str]:
-        """
-        각 상호작용 타입별 CTE 쿼리를 생성합니다.
-        """
-        ctes = {}
-        rating_rules = self.config['rating_rules']
-
-        # 각 상호작용 타입별 CTE 생성
-        for interaction_type, rule in rating_rules.items():
-            if interaction_type in ['view', 'impression']:
-                # 단순 카운트 테이블
-                ctes[interaction_type] = f"""
-                    {interaction_type} as (
-                        select {rule['user_col']}, {rule['item_col']}, 
-                               count(*) as {rule['count_col']}
-                        from {rule['table']}
-                        where {rule['user_col']} is not null
-                            and created_at >= {start_date}
-                        group by {rule['user_col']}, {rule['item_col']}
-                    )
-                """
-            elif interaction_type in ['like', 'cart']:
-                # 특정 이벤트 필터링이 필요한 테이블
-                ctes[interaction_type] = f"""
-                    {interaction_type}_action as (
-                        select {rule['user_col']}, {rule['item_col']}, 
-                               count(*) as {rule['count_col']}
-                        from {rule['table']}
-                        where {rule['user_col']} is not null
-                            and created_at >= {start_date}
-                            and event_name = '{rule['event_name']}'
-                        group by {rule['user_col']}, {rule['item_col']}
-                    )
-                """
-            elif interaction_type == 'purchase':
-                # 구매 테이블
-                ctes[interaction_type] = f"""
-                    purchase as (
-                        select {rule['user_col']}, {rule['item_col']}, 
-                               count(*) as {rule['count_col']}
-                        from {rule['table']}
-                        where {rule['user_col']} is not null
-                            and created_at >= {start_date}
-                        group by {rule['user_col']}, {rule['item_col']}
-                    )
-                """
-
-        return ctes
-
-    def _build_case_statement(self) -> str:
-        """
-        rating 값을 계산하는 CASE 문을 생성합니다.
-        """
-        rating_rules = self.config['rating_rules']
-        case_conditions = []
-
-        # 구매
-        if 'purchase' in rating_rules:
-            case_conditions.append(
-                f"when purchase_count <> 0 then {rating_rules['purchase']['value']}"
-            )
-
-        # 장바구니
-        if 'cart' in rating_rules:
-            case_conditions.append(
-                f"when cart_count is not null then {rating_rules['cart']['value']}"
-            )
-
-        # 좋아요
-        if 'like' in rating_rules:
-            case_conditions.append(
-                f"when like_count is not null then {rating_rules['like']['value']}"
-            )
-
-        # 조회수 기반 점수
-        if 'view' in rating_rules:
-            for threshold in rating_rules['view']['thresholds']:
-                case_conditions.append(
-                    f"when view_count >= {threshold['min_count']} then {threshold['value']}"
+        """각 상호작용 타입별 CTE 쿼리를 생성합니다."""
+        return {
+            'purchases': f"""
+                purchases AS (
+                    SELECT member_id, product_id, COUNT(*) as purchase_count
+                    FROM orders o
+                    JOIN order_items oi ON o.id = oi.order_id
+                    WHERE o.created_at >= '{start_date}'
+                    AND o.status = 'completed'
+                    GROUP BY member_id, product_id
                 )
-
-        # 노출수 기반 점수
-        if 'impression' in rating_rules:
-            for threshold in rating_rules['impression']['thresholds']:
-                case_conditions.append(
-                    f"when impression_count >= {threshold['min_count']} then {threshold['value']}"
+            """,
+            'cart_items': f"""
+                cart_items AS (
+                    SELECT member_id, product_id, COUNT(*) as cart_count
+                    FROM cart_items
+                    WHERE created_at >= '{start_date}'
+                    GROUP BY member_id, product_id
                 )
-
-        case_conditions.append("else 0")
-        
-        return "case " + " ".join(case_conditions) + " end"
-
+            """,
+            'likes': f"""
+                likes AS (
+                    SELECT member_id, product_id, COUNT(*) as like_count
+                    FROM likes
+                    WHERE created_at >= '{start_date}'
+                    GROUP BY member_id, product_id
+                )
+            """,
+            'views': f"""
+                views AS (
+                    SELECT member_id, product_id, COUNT(*) as view_count
+                    FROM product_views
+                    WHERE created_at >= '{start_date}'
+                    GROUP BY member_id, product_id
+                )
+            """,
+            'impressions': f"""
+                impressions AS (
+                    SELECT member_id, product_id, COUNT(*) as impression_count
+                    FROM product_impressions
+                    WHERE created_at >= '{start_date}'
+                    GROUP BY member_id, product_id
+                )
+            """
+        }
+    
     def _build_where_conditions(self) -> str:
-        """
-        필터링 조건을 생성합니다.
-        """
-        filter_conditions = self.config['filter_conditions']
-        conditions = []
-
-        # 최소 노출 수 조건
-        if 'min_impression_count' in filter_conditions:
-            conditions.append(
-                f"impression_count >= {filter_conditions['min_impression_count']}"
+        """WHERE 절 조건을 생성합니다."""
+        return """
+            WHERE (
+                p.purchase_count > 0 OR
+                c.cart_count > 0 OR
+                l.like_count > 0 OR
+                v.view_count >= 3 OR
+                i.impression_count >= 5
             )
-
-        # 필수 상호작용 조건
-        if 'require_any' in filter_conditions:
-            require_conditions = [
-                f"{cond} is not null" for cond in filter_conditions['require_any']
-            ]
-            conditions.append(
-                f"({' or '.join(require_conditions)})"
-            )
-
-        return " or ".join(conditions)
-
+        """
+    
     def get_user_item_interactions(self, days: Optional[int] = None) -> pd.DataFrame:
         """
-        사용자-아이템 상호작용 데이터를 가져옵니다.
+        사용자-상품 상호작용 데이터를 가져옵니다.
         
         Args:
-            days (int, optional): 최근 몇 일간의 데이터를 가져올지 지정
+            days (Optional[int]): 최근 몇 일간의 데이터를 가져올지 지정
             
         Returns:
-            pd.DataFrame: 상호작용 데이터
+            pd.DataFrame: 상호작용 데이터 (member_id, product_id, rating)
         """
         try:
-            if days is None:
-                days = self.config['data_preprocessing'].get('default_days', 30)
+            # 시작 날짜 계산
+            date_condition = f"CURRENT_DATE - INTERVAL '{days} days'" if days else "CURRENT_DATE - INTERVAL '30 days'"
             
-            query = """
+            # CTE 쿼리 생성
+            cte_queries = self._build_cte_queries(date_condition)
+            
+            # 메인 쿼리 생성
+            query = f"""
+                WITH {','.join(cte_queries.values())}
                 SELECT 
-                    i.member_id as member_id,
-                    i.product_id as product_id,
-                    COUNT(*) as impression_count,
-                    COUNT(DISTINCT v.id) as view_count,
-                    COUNT(DISTINCT CASE WHEN l.event_name = 'LikedEvent' THEN l.id END) as like_count,
-                    COUNT(DISTINCT CASE WHEN c.event_name = 'CartItemPutEvent' THEN c.id END) as cart_count,
-                    COUNT(DISTINCT p.id) as purchase_count,
-                    CASE
-                        WHEN COUNT(DISTINCT p.id) > 0 THEN 5.0
-                        WHEN COUNT(DISTINCT CASE WHEN c.event_name = 'CartItemPutEvent' THEN c.id END) > 0 THEN 4.5
-                        WHEN COUNT(DISTINCT CASE WHEN l.event_name = 'LikedEvent' THEN l.id END) > 0 THEN 4.0
-                        WHEN COUNT(DISTINCT v.id) >= 3 THEN 3.8
-                        WHEN COUNT(DISTINCT v.id) >= 1 THEN 3.0
-                        WHEN COUNT(*) >= 9 THEN -3.0
-                        WHEN COUNT(*) >= 6 THEN -2.0
-                        WHEN COUNT(*) >= 3 THEN -1.0
-                        ELSE 0
-                    END as rating
-                FROM product_impression i
-                LEFT JOIN product_view v 
-                    ON i.member_id = v.member_id
-                    AND i.product_id = v.product_id
-                    AND v.created_at >= DATE_SUB(NOW(), INTERVAL :days DAY)
-                LEFT JOIN action_log l
-                    ON i.member_id = l.member_id
-                    AND i.product_id = l.product_id
-                    AND l.created_at >= DATE_SUB(NOW(), INTERVAL :days DAY)
-                    AND l.event_name = 'LikedEvent'
-                LEFT JOIN action_log c
-                    ON i.member_id = c.member_id
-                    AND i.product_id = c.product_id
-                    AND c.created_at >= DATE_SUB(NOW(), INTERVAL :days DAY)
-                    AND c.event_name = 'CartItemPutEvent'
-                LEFT JOIN purchased_product p
-                    ON i.member_id = p.customer_id
-                    AND i.product_id = p.archived_id
-                    AND p.created_at >= DATE_SUB(NOW(), INTERVAL :days DAY)
-                WHERE i.created_at >= DATE_SUB(NOW(), INTERVAL :days DAY)
-                GROUP BY i.member_id, i.product_id
-                HAVING 
-                    impression_count >= 3
-                    AND (
-                        view_count > 0 OR like_count > 0 
-                        OR cart_count > 0 OR purchase_count > 0
-                    )
+                    COALESCE(p.member_id, c.member_id, l.member_id, v.member_id, i.member_id) as member_id,
+                    COALESCE(p.product_id, c.product_id, l.product_id, v.product_id, i.product_id) as product_id,
+                    GREATEST(
+                        COALESCE(CASE WHEN p.purchase_count > 0 THEN 5.0 END, 0),
+                        COALESCE(CASE WHEN c.cart_count > 0 THEN 4.0 END, 0),
+                        COALESCE(CASE WHEN l.like_count > 0 THEN 3.0 END, 0),
+                        COALESCE(CASE WHEN v.view_count >= 3 THEN 2.0 END, 0),
+                        COALESCE(CASE WHEN i.impression_count >= 5 THEN 1.0 END, 0)
+                    ) as rating
+                FROM purchases p
+                FULL OUTER JOIN cart_items c USING (member_id, product_id)
+                FULL OUTER JOIN likes l USING (member_id, product_id)
+                FULL OUTER JOIN views v USING (member_id, product_id)
+                FULL OUTER JOIN impressions i USING (member_id, product_id)
             """
             
+            # WHERE 조건 추가
+            query += self._build_where_conditions()
+            
+            # 쿼리 실행
             with self.db.get_connection() as conn:
-                df = pd.read_sql(text(query), conn, params={'days': days})
-                self.logger.info(f"총 {len(df)}개의 상호작용 데이터 로드 완료")
-                return df
-                
+                interactions = pd.read_sql(query, conn)
+            
+            self.logger.info(f"총 {len(interactions)}개의 상호작용 데이터를 가져왔습니다.")
+            return interactions
+            
         except Exception as e:
-            self.logger.error(f"데이터베이스에서 상호작용 데이터 가져오기 실패: {str(e)}")
+            self.logger.error(f"상호작용 데이터 가져오기 실패: {str(e)}")
             raise
     
     def get_item_features(self) -> pd.DataFrame:

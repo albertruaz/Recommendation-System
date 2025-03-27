@@ -8,13 +8,10 @@ import os
 import argparse
 import logging
 import pandas as pd
-from typing import List, Tuple
 
-from pyspark.sql import SparkSession, functions as F
-from pyspark.ml.evaluation import RegressionEvaluator
-from pyspark.ml.recommendation import ALS as SparkALS
 from utils import setup_logging
 from database.recommendation_db import RecommendationDB
+from models.als import ALSRecommender
 
 class RecommendationError(Exception):
     """추천 시스템 관련 예외"""
@@ -47,80 +44,31 @@ def generate_recommendations(interactions_df: pd.DataFrame, top_n: int = 300) ->
     """
     PySpark ALS를 사용하여 전체 사용자에 대한 추천을 생성합니다.
     """
+    recommender = None
     try:
-        import findspark
-        findspark.init()
-        
-        # SparkSession 생성
-        spark = (SparkSession.builder
-            .appName("ALS Recommendation System")
-            .master("local[*]")
-            .config("spark.driver.memory", "4g")
-            .config("spark.executor.memory", "4g")
-            .getOrCreate())
-        
-        # 로그 레벨 설정
-        spark.sparkContext.setLogLevel("ERROR")
-        
-        # DataFrame 생성 (스키마 없이 직접 생성)
-        ratings_df = spark.createDataFrame(
-            interactions_df[["member_id", "product_id", "rating"]]
-        )
-        
-        # 학습/테스트 데이터 분할
-        train_data, test_data = ratings_df.randomSplit([0.8, 0.2])
-        
-        # ALS 모델 설정
-        als = SparkALS(
-            maxIter=15,
-            regParam=0.1,
+        # ALS 추천 시스템 초기화
+        recommender = ALSRecommender(
+            max_iter=15,
+            reg_param=0.1,
             rank=10,
-            userCol="member_id",
-            itemCol="product_id",
-            ratingCol="rating",
-            coldStartStrategy="drop"
+            cold_start_strategy="drop"
         )
         
         # 모델 학습
-        model = als.fit(train_data)
-        
-        # 성능 평가
-        predictions = model.transform(test_data)
-        evaluator = RegressionEvaluator(
-            metricName="rmse",
-            labelCol="rating",
-            predictionCol="prediction"
-        )
-        rmse = evaluator.evaluate(predictions)
+        rmse = recommender.train(interactions_df)
         print(f"Root-mean-square error (RMSE): {rmse:.2f}")
         
-        # 전체 사용자에 대한 추천 생성
-        user_recs = model.recommendForAllUsers(top_n)
-        
-        # recommendations 컬럼을 평탄화
-        flattened_recs = user_recs.select(
-            "member_id",
-            F.explode("recommendations").alias("rec")
-        )
-        
-        # rec 컬럼에서 product_id와 rating 분리
-        flattened_recs = flattened_recs.select(
-            "member_id",
-            flattened_recs["rec.product_id"].alias("product_id"),
-            flattened_recs["rec.rating"].alias("predicted_rating")
-        )
-        
-        # Pandas DataFrame으로 변환
-        recommendations_df = flattened_recs.toPandas()
-        
-        # SparkSession 종료
-        spark.stop()
-        
+        # 추천 생성
+        recommendations_df = recommender.generate_recommendations(top_n)
         return recommendations_df
         
     except Exception as e:
         logging.error(f"PySpark ALS 추천 생성 실패: {str(e)}")
         raise Exception(f"PySpark ALS 오류: {str(e)}")
+    
+    finally:
+        if recommender is not None:
+            recommender.cleanup()
 
 def main():
     parser = argparse.ArgumentParser(description='ALS 기반 추천 시스템')
