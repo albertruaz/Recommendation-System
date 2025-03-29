@@ -2,7 +2,6 @@
 
 import os
 import json
-import argparse
 import pandas as pd
 
 from database.recommendation_db import RecommendationDB
@@ -36,7 +35,7 @@ def generate_recommendations(interactions_df: pd.DataFrame, top_n: int = 300) ->
     recommender = None
     try:
         # ALS 추천 시스템 초기화
-        recommender = ALSRecommender(**CONFIG['als_params'])
+        recommender = ALSRecommender()
         
         # 모델 학습
         rmse = recommender.train(interactions_df)
@@ -54,22 +53,10 @@ def generate_recommendations(interactions_df: pd.DataFrame, top_n: int = 300) ->
             recommender.cleanup()
 
 def main():
-    # 커맨드 라인 인자 파싱
-    parser = argparse.ArgumentParser(description='ALS 기반 추천 시스템')
-    parser.add_argument('--days', type=int, default=CONFIG['default_params']['days'],
-                      help=f"최근 몇 일간의 데이터를 사용할지 지정 (기본값: {CONFIG['default_params']['days']})")
-    parser.add_argument('--top_n', type=int, default=CONFIG['default_params']['top_n'],
-                      help=f"각 사용자에게 추천할 상품 수 (기본값: {CONFIG['default_params']['top_n']})")
-    parser.add_argument('--output_dir', type=str, default=CONFIG['default_params']['output_dir'],
-                      help=f"결과를 저장할 디렉토리 (기본값: {CONFIG['default_params']['output_dir']})")
-    parser.add_argument('--verbose', action='store_true', default=CONFIG['default_params']['verbose'],
-                      help='상세 출력 활성화')
-    args = parser.parse_args()
-    
     try:
         # 데이터베이스에서 상호작용 데이터 가져오기
         print("\n=== 데이터베이스에서 상호작용 데이터 가져오기 ===")
-        interactions_df = get_data_from_db(days=args.days)
+        interactions_df = get_data_from_db(days=CONFIG['default_params']['days'])
         print(f"총 상호작용 수: {len(interactions_df)}")
         print(f"고유 사용자 수: {interactions_df['member_id'].nunique()}")
         print(f"고유 상품 수: {interactions_df['product_id'].nunique()}")
@@ -78,7 +65,7 @@ def main():
         print("\n=== Implicit ALS 모델로 추천 생성 시작 ===")
         recommendations_df = generate_recommendations(
             interactions_df=interactions_df,
-            top_n=args.top_n
+            top_n=CONFIG['default_params']['top_n']
         )
         
         # 결과 출력 (처음 5개만)
@@ -87,8 +74,9 @@ def main():
         print(f"총 추천 수: {len(recommendations_df)}")
         
         # 결과를 CSV 파일로 저장
-        os.makedirs(args.output_dir, exist_ok=True)
-        output_path = os.path.join(args.output_dir, f'recommendations_{args.days}days.csv')
+        output_dir = CONFIG['default_params']['output_dir']
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f'recommendations_{CONFIG["default_params"]["days"]}days.csv')
         recommendations_df.to_csv(output_path, index=False)
         print(f"\n추천 결과가 {output_path}에 저장되었습니다.")
     
