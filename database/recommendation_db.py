@@ -9,6 +9,7 @@ import pandas as pd
 from typing import Optional
 from .db_connector import DBConnector
 from sqlalchemy import text
+from utils.logger import setup_logger
 
 class RecommendationDB:
     """추천 시스템을 위한 데이터베이스 유틸리티 클래스"""
@@ -16,6 +17,7 @@ class RecommendationDB:
     def __init__(self):
         """데이터베이스 연결 초기화"""
         self.db = DBConnector()
+        self.logger = setup_logger('db')
     
     def get_user_item_interactions(self, days: Optional[int] = None) -> pd.DataFrame:
         """
@@ -39,9 +41,9 @@ class RecommendationDB:
                         CAST(v.product_id AS UNSIGNED) as product_id,
                         'view' as interaction_type,
                         CASE 
-                            WHEN COUNT(DISTINCT v.id) >= 3 THEN 1  -- 3회 이상 조회
+                            WHEN COUNT(DISTINCT v.id) >= 3 THEN 3  -- 3회 이상 조회
                             WHEN COUNT(DISTINCT v.id) >= 1 THEN 2  -- 1회 이상 조회
-                            ELSE 3                                 -- 단순 노출
+                            ELSE 1                                 -- 단순 노출
                         END as view_type,
                         v.created_at
                     FROM product_view v
@@ -116,12 +118,19 @@ class RecommendationDB:
                 df['product_id'] = pd.to_numeric(df['product_id'], errors='coerce').astype('Int64')
                 df = df.dropna(subset=['member_id', 'product_id'])
                 
-                print(f"총 {len(df)}개의 상호작용 데이터 로드 완료")
-                print(f"고유 사용자 수: {df['member_id'].nunique()}")
-                print(f"고유 상품 수: {df['product_id'].nunique()}")
+                # 데이터 통계 로깅
+                self.logger.info(f"총 {len(df)}개의 상호작용 데이터 로드 완료")
+                self.logger.info(f"고유 사용자 수: {df['member_id'].nunique()}")
+                self.logger.info(f"고유 상품 수: {df['product_id'].nunique()}")
+                
+                # 상호작용 타입별 통계
+                interaction_stats = df.groupby('interaction_type').size()
+                self.logger.info("\n상호작용 타입별 통계:")
+                for interaction_type, count in interaction_stats.items():
+                    self.logger.info(f"- {interaction_type}: {count}건")
                 
                 return df
                 
         except Exception as e:
-            print(f"데이터베이스에서 상호작용 데이터 가져오기 실패: {str(e)}")
+            self.logger.error(f"데이터베이스에서 상호작용 데이터 가져오기 실패: {str(e)}")
             raise 

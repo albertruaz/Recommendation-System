@@ -4,43 +4,50 @@
 
 ## 주요 기능
 
-- 사용자-상품 상호작용 데이터를 기반으로 한 추천 생성
-- 다양한 상호작용 타입(조회, 좋아요, 장바구니 등)에 대한 가중치 적용
-- 상호작용 빈도와 타입을 고려한 신뢰도 점수 계산
-- 대규모 사용자-상품 데이터 처리 지원
+### 1. 상호작용 기반 추천
 
-## 시스템 요구사항
+- 다양한 사용자-상품 상호작용 데이터 활용
+  - 조회 (view): 조회 횟수와 타입에 따른 가중치 적용
+  - 좋아요 (like): 상품에 대한 관심도 반영
+  - 장바구니 (cart): 구매 의도 반영
+  - 구매 (purchase): 실제 구매 행동 반영
+  - 리뷰 (review): 상품 사용 후기 반영
 
-- Python 3.8 이상
-- MySQL 데이터베이스
+### 2. 가중치 시스템
 
-## 설치 방법
+- 상호작용 타입별 차등 가중치 적용
+  - 조회 타입별 가중치: 1.0 ~ 3.0
+  - 좋아요: 5.0
+  - 장바구니: 10.0
+  - 구매: 13.0
+  - 리뷰: 15.0
 
-1. 저장소 클론
+### 3. 자동 로깅 시스템
+
+- 날짜별 로그 파일 자동 생성
+- 모든 실행 정보와 에러를 로그 파일에 기록
+- 로그 레벨별 구분된 메시지 관리
+
+## 환경 설정
+
+### 1. Conda 환경 생성 및 활성화
 
 ```bash
-git clone [repository_url]
-cd recommendation
+# 환경 생성
+conda create -n recommendation python=3.8
+conda activate recommendation
+
+# 필요한 패키지 설치
+conda install -c conda-forge pandas numpy scipy
+conda install -c conda-forge implicit
+conda install -c conda-forge pymysql sqlalchemy python-dotenv
 ```
 
-2. 가상환경 생성 및 활성화
+### 2. 환경 변수 설정
 
-```bash
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-venv\Scripts\activate  # Windows
-```
+`.env` 파일을 생성하고 다음 내용을 설정:
 
-3. 필요한 패키지 설치
-
-```bash
-pip install -r requirements.txt
-```
-
-4. 환경 변수 설정
-   `.env` 파일을 생성하고 다음 내용을 설정:
-
-```
+```env
 # 데이터베이스 설정
 DB_HOST=your_host
 DB_PORT=your_port
@@ -49,7 +56,43 @@ DB_PASSWORD=your_password
 DB_NAME=your_database
 ```
 
-## 사용 방법
+## 설정 파일 (config/config.json)
+
+### 1. 상호작용 가중치
+
+```json
+"interaction_weights": {
+  "view_type_1": 3.0,  // 3회 이상 조회
+  "view_type_2": 2.0,  // 1회 이상 조회
+  "view_type_3": 1.0,  // 단순 노출
+  "like": 5.0,         // 좋아요
+  "cart": 10.0,        // 장바구니
+  "purchase": 13.0,    // 구매
+  "review": 15.0       // 리뷰
+}
+```
+
+### 2. 모델 파라미터
+
+```json
+"als_params": {
+  "max_iter": 15,      // 최대 반복 횟수
+  "reg_param": 0.1,    // 정규화 파라미터
+  "rank": 10,          // 잠재 요인 개수
+}
+```
+
+### 3. 기본 실행 설정
+
+```json
+"default_params": {
+  "days": 30,          // 최근 데이터 기간
+  "top_n": 300,        // 추천 상품 수
+  "output_dir": "output"  // 결과 저장 경로
+}
+```
+
+## 실행 방법
 
 기본 실행:
 
@@ -57,64 +100,37 @@ DB_NAME=your_database
 python main_als.py
 ```
 
-옵션 지정:
-
-```bash
-python main_als.py --days 30 --top_n 300 --output_dir output --verbose
-```
-
-### 주요 매개변수
-
-- `--days`: 최근 몇 일간의 데이터를 사용할지 지정 (기본값: 30)
-- `--top_n`: 각 사용자에게 추천할 상품 수 (기본값: 300)
-- `--output_dir`: 결과를 저장할 디렉토리 (기본값: output)
-- `--verbose`: 상세 로깅 활성화
-
 ## 프로젝트 구조
 
 ```
 recommendation/
 ├── config/
-│   └── rating_weights.py     # 상호작용 가중치 설정
+│   └── config.json           # 설정 파일
 ├── database/
-│   ├── db_connector.py       # 데이터베이스 연결 관리
-│   └── recommendation_db.py  # 추천 관련 데이터베이스 쿼리
+│   ├── db_connector.py       # DB 연결 관리
+│   └── recommendation_db.py  # 추천 관련 DB 쿼리
 ├── models/
-│   └── als.py               # ALS 추천 시스템 구현
+│   ├── base_als.py          # ALS 기본 클래스
+│   └── implicit_als.py      # Implicit ALS 구현
 ├── utils/
-│   ├── __init__.py
-│   ├── config.py            # 설정 파일 관리
 │   └── logger.py            # 로깅 설정
-├── output/                   # 추천 결과 저장 디렉토리
-├── logs/                     # 로그 파일 디렉토리
-├── .env                      # 환경 변수 설정
-├── .gitignore
-├── main_als.py              # 메인 실행 스크립트
-└── requirements.txt         # 필요한 패키지 목록
+├── logs/                    # 로그 파일 저장
+├── output/                  # 추천 결과 저장
+├── .env                     # 환경 변수
+└── main_als.py             # 메인 실행 스크립트
 ```
 
-## 상호작용 가중치
+## 출력 결과
 
-상호작용 타입별 가중치는 `config/rating_weights.py`에 정의되어 있습니다:
+추천 결과는 CSV 파일로 저장되며 다음 정보를 포함합니다:
 
-- 조회 (view)
-  - view_type_1: 3.0 (3회 이상 조회)
-  - view_type_2: 2.0 (1회 이상 조회)
-  - view_type_3: 1.0 (단순 노출)
-- 좋아요 (like): 4.0
-- 장바구니 (cart): 5.0
-- 구매 (purchase): 10.0
-- 리뷰 (review): 8.0
+- member_id: 사용자 ID
+- product_id: 추천 상품 ID
+- predicted_rating: 예측 선호도 점수
 
 ## 로깅
 
-로그는 `logs` 디렉토리에 저장되며, 다음 정보를 포함합니다:
+모든 실행 로그는 `logs` 디렉토리에 날짜별로 저장됩니다:
 
-- 데이터베이스 연결/쿼리 실행
-- 모델 학습 과정
-- 추천 생성 과정
-- 오류 및 예외 상황
-
-## 라이선스
-
-이 프로젝트는 MIT 라이선스를 따릅니다.
+- 파일명 형식: YYYYMMDD.log
+- 로그 포맷: `시간 - 모듈명 - 로그레벨 - 메시지`

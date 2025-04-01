@@ -1,10 +1,9 @@
 """
 ALS 기반 추천 시스템 모델
 
-이 모듈은 Implicit ALS를 사용하여 사용자-상품 추천을 생성하는 클래스를 제공합니다.
-상호작용 가중치는 config/rating_weights.py에 정의되어 있습니다.
+이 모듈은 명시적 선호도를 사용하는 ALS를 구현합니다.
 """
-
+import os
 import sys
 sys.path.append("./libs/implicit")
 
@@ -12,12 +11,8 @@ import json
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-# from implicit.als import _als_least_squares
-# from implicit.als import _als
-# from implicit.cpu._als import least_squares
 from implicit.cpu import _als
-
-from typing import Tuple, Dict, List
+from utils.logger import setup_logger
 
 # 설정 파일 로드
 with open('config/config.json', 'r') as f:
@@ -46,19 +41,12 @@ class ALSRecommender:
         self.idx2user = []
         self.item2idx = {}
         self.idx2item = []
+        
+        # 로거 설정
+        self.logger = setup_logger('als')
     
     def _calculate_preference(self, row: pd.Series) -> float:
-        """상호작용 타입에 따른 선호도 점수 계산
-        
-        Args:
-            row (pd.Series): 상호작용 데이터 행
-                필수 컬럼:
-                - interaction_type: 상호작용 타입 (view, like, cart 등)
-                - view_type: view 타입 (1, 2, 3), view인 경우에만 사용
-            
-        Returns:
-            float: 계산된 선호도 점수 (0~1 사이 값)
-        """
+        """상호작용 타입에 따른 선호도 점수 계산"""
         interaction_type = row["interaction_type"]
         view_type = f"view_type_{int(row['view_type'])}" if pd.notna(row["view_type"]) else None
         
@@ -75,15 +63,8 @@ class ALSRecommender:
         p_ui = (weight - min_weight) / (max_weight - min_weight)
         return p_ui
     
-    def _prepare_matrices(self, interactions_df: pd.DataFrame) -> Tuple[sp.csr_matrix, sp.csr_matrix]:
-        """상호작용 데이터를 sparse matrix로 변환
-        
-        Args:
-            interactions_df (pd.DataFrame): 상호작용 데이터
-            
-        Returns:
-            Tuple[sp.csr_matrix, sp.csr_matrix]: (선호도 행렬, 신뢰도 행렬)
-        """
+    def _prepare_matrices(self, interactions_df: pd.DataFrame) -> sp.csr_matrix:
+        """상호작용 데이터를 선호도 행렬로 변환"""
         # 1. 유니크 사용자/상품 인덱싱
         unique_users = sorted(interactions_df["member_id"].unique())
         unique_items = sorted(interactions_df["product_id"].unique())
@@ -92,6 +73,8 @@ class ALSRecommender:
         self.idx2user = unique_users
         self.item2idx = {m: i for i, m in enumerate(unique_items)}
         self.idx2item = unique_items
+        
+        self.logger.info(f"사용자 수: {len(unique_users)}, 아이템 수: {len(unique_items)}")
         
         # 2. 선호도 점수(p_ui) 계산
         interactions_df["p_ui"] = interactions_df.apply(self._calculate_preference, axis=1)
@@ -112,135 +95,120 @@ class ALSRecommender:
             shape=(len(self.user2idx), len(self.item2idx))
         ).tocsr()
         
-        # C matrix (신뢰도)
-        # p_ui가 0이 아닌 모든 값에 대해 c_ui = 1 부여
-        c_ui = np.ones_like(p_ui)
-        C = sp.coo_matrix(
-            (c_ui, (row, col)),
-            shape=(len(self.user2idx), len(self.item2idx))
-        ).tocsr()
+        # 행렬 정보 로깅
+        self.logger.info(f"\n행렬 변환 결과:")
+        self.logger.info(f"- 행렬 크기: {P.shape}")
+        self.logger.info(f"- 비영요소 수: {P.nnz}")
+        self.logger.info(f"- 밀도: {P.nnz / (P.shape[0] * P.shape[1]):.4%}")
         
-        return P, C
+        # 데이터 타입 변환
+        P.data = P.data.astype(np.float32)
+        P.indices = P.indices.astype(np.int32)
+        P.indptr = P.indptr.astype(np.int32)
+        
+        return P
     
     def train(self, interactions_df: pd.DataFrame) -> None:
-        """모델 학습
-        
-        Args:
-            interactions_df (pd.DataFrame): 상호작용 데이터
-                필수 컬럼:
-                - member_id: 사용자 ID
-                - product_id: 상품 ID
-                - interaction_type: 상호작용 타입 (view, like, cart 등)
-                - view_type: view 타입 (1, 2, 3), view인 경우에만 사용
-                - interaction_count: 해당 상호작용의 발생 횟수
-        """
+        """모델 학습"""
         try:
-            # 1. P(선호도)와 C(신뢰도) 행렬 준비
-            P, C = self._prepare_matrices(interactions_df)
-            print(f"[DEBUG] P.shape = {P.shape}, P.nnz = {P.nnz}, "
-                f"P.data.dtype = {P.data.dtype}, "
-                f"max(P.indices) = {P.indices.max() if P.nnz else 'N/A'}, "
-                f"max(P.indptr) = {P.indptr.max()}")
-
-            print(f"[DEBUG] C.shape = {C.shape}, C.nnz = {C.nnz}, "
-                f"C.data.dtype = {C.data.dtype}, "
-                f"max(C.indices) = {C.indices.max() if C.nnz else 'N/A'}, "
-                f"max(C.indptr) = {C.indptr.max()}")
+            self.logger.info("ALS 모델 학습 시작")
+            
+            # 1. 선호도 행렬 준비
+            P = self._prepare_matrices(interactions_df)
+            Pt = P.T.tocsr()  # 전치행렬
             
             # 2. 잠재 요인 행렬 초기화
             np.random.seed(self.random_state)
-            X = np.random.rand(len(self.user2idx), self.rank).astype(np.float32)  # 사용자 행렬
-            Y = np.random.rand(len(self.item2idx), self.rank).astype(np.float32)  # 아이템 행렬
-            print(f"[DEBUG] X.shape = {X.shape}, X.dtype = {X.dtype}, "
-                f"X.min()={X.min()}, X.max()={X.max()}")
-            print(f"[DEBUG] Y.shape = {Y.shape}, Y.dtype = {Y.dtype}, "
-                f"Y.min()={Y.min()}, Y.max()={Y.max()}")
+            X = np.random.rand(len(self.user2idx), self.rank).astype(np.float32) * 0.01
+            Y = np.random.rand(len(self.item2idx), self.rank).astype(np.float32) * 0.01
             
-            C.data = C.data.astype(np.float32)
-            C.indices = C.indices.astype(np.int32)
-            C.indptr = C.indptr.astype(np.int32)
-            P.data = P.data.astype(np.float32)
-            P.indices = P.indices.astype(np.int32)
-            P.indptr = P.indptr.astype(np.int32)
-            print("[DEBUG] After casting C:")
-            print(f"  C.shape = {C.shape}, C.nnz = {C.nnz}, "
-                f"C.data.dtype = {C.data.dtype}, "
-                f"max(C.indices) = {C.indices.max() if C.nnz else 'N/A'}, "
-                f"max(C.indptr) = {C.indptr.max()}")
-            print("[DEBUG] After casting P:")
-            print(f"  P.shape = {P.shape}, P.nnz = {P.nnz}, "
-                f"P.data.dtype = {P.data.dtype}, "
-                f"max(P.indices) = {P.indices.max() if P.nnz else 'N/A'}, "
-                f"max(P.indptr) = {P.indptr.max()}")
             # 3. ALS 반복 학습
-            print("\n=== ALS 학습 시작 ===")
             for iteration in range(self.max_iter):
-                print(f"\n--- Iteration {iteration+1}/{self.max_iter} ---")
-                # (1) 아이템 행렬 갱신: Ct = C.T
-                Ct = C.T  # CSC 형태
-                print("[DEBUG] Ct (C.T) info:")
-                print(f"  Ct.shape = {Ct.shape}, Ct.nnz = {Ct.nnz}, "
-                    f"Ct.data.dtype = {Ct.data.dtype}, "
-                    f"max(Ct.indices) = {Ct.indices.max() if Ct.nnz else 'N/A'}, "
-                    f"max(Ct.indptr) = {Ct.indptr.max()}")
-                # 혹시 CSC가 float64로 바뀌는지 다시 캐스팅
-                Ct.data = Ct.data.astype(np.float32)
-                Ct.indices = Ct.indices.astype(np.int32)
-                Ct.indptr = Ct.indptr.astype(np.int32)
-
-                # YtY
+                # (1) 아이템 행렬 갱신
                 YtY = Y.T @ Y
-                print(f"[DEBUG] YtY.shape = {YtY.shape}, YtY.dtype = {YtY.dtype}, "
-                    f"YtY.min()={YtY.min()}, YtY.max()={YtY.max()}")
-
-                print("[DEBUG] _als._least_squares for ITEM update...")
-                _als._least_squares(
-                    YtY.astype(np.float32),
-                    Ct.indptr,
-                    Ct.indices,
-                    Ct.data,
-                    Y,   # 업데이트할 행렬
-                    X,   # 고정된 행렬
-                    self.reg_param,
-                    0
-                )
-
-                print(f"[DEBUG] After ITEM update: Y.min={Y.min()}, Y.max={Y.max()}")
-
-                # (2) 사용자 행렬 갱신: XtX
-                XtX = X.T @ X
-                print(f"[DEBUG] XtX.shape = {XtX.shape}, XtX.dtype = {XtX.dtype}, "
-                    f"XtX.min()={XtX.min()}, XtX.max()={XtX.max()}")
-
-                print("[DEBUG] _als._least_squares for USER update...")
-                _als._least_squares(
-                    XtX.astype(np.float32),
-                    C.indptr,
-                    C.indices,
-                    C.data,
+                _als.least_squares(
+                    P,
                     X,   # 업데이트할 행렬
                     Y,   # 고정된 행렬
                     self.reg_param,
-                    0
+                    num_threads=0
                 )
-                print(f"[DEBUG] After USER update: X.min={X.min()}, X.max={X.max()}")
+                
+                # (2) 사용자 행렬 갱신
+                XtX = X.T @ X
+                _als.least_squares(
+                    Pt,
+                    Y,   # 업데이트할 행렬
+                    X,   # 고정된 행렬
+                    self.reg_param,
+                    num_threads=0
+                )
+                
+                # 현재 RMSE 계산
+                pred = X @ Y.T
+                mask = P.toarray() > 0
+                rmse = np.sqrt(np.mean((P.toarray()[mask] - pred[mask]) ** 2))
+                self.logger.info(f"Iteration {iteration + 1}/{self.max_iter}, RMSE: {rmse:.4f}")
             
             self.user_factors = X
             self.item_factors = Y
-            print("=== ALS 학습 완료 ===")
+            self.logger.info("모델 학습 완료")
+            
+            # 학습 결과 분석
+            self.logger.info("\n=== 학습 결과 분석 ===")
+            predictions = []
+            
+            # 실제 상호작용이 있는 데이터에 대해서만 분석
+            for _, row in interactions_df.iterrows():
+                user_idx = self.user2idx[row['member_id']]
+                item_idx = self.item2idx[row['product_id']]
+                actual_weight = self._calculate_preference(row)
+                pred_score = np.dot(self.user_factors[user_idx], self.item_factors[item_idx])
+                
+                predictions.append({
+                    'user_id': row['member_id'],
+                    'item_id': row['product_id'],
+                    'interaction_type': row['interaction_type'],
+                    'view_type': row['view_type'] if row['interaction_type'] == 'view' else None,
+                    'actual_weight': actual_weight,
+                    'predicted_score': pred_score
+                })
+            
+            # 결과를 DataFrame으로 변환하고 정렬
+            result_df = pd.DataFrame(predictions)
+            result_df = result_df.sort_values('actual_weight', ascending=False)
+            
+            # CSV 파일로 저장
+            output_path = 'output/weight_analysis.csv'
+            os.makedirs('output', exist_ok=True)
+            result_df.to_csv(output_path, index=False)
+            
+            # 상위 100개 결과 로깅
+            self.logger.info("\n=== 상위 100개 가중치 비교 ===")
+            self.logger.info("User ID | Item ID | Type | View Type | Actual Weight | Predicted Score")
+            self.logger.info("-" * 75)
+            
+            for _, row in result_df.head(100).iterrows():
+                view_type_str = f"type_{int(row['view_type'])}" if pd.notna(row['view_type']) else "N/A"
+                view_type_display = view_type_str if row['interaction_type'] == 'view' else "-"
+                
+                self.logger.info(
+                    f"{row['user_id']:7d} | "
+                    f"{row['item_id']:7d} | "
+                    f"{row['interaction_type']:<6s} | "
+                    f"{view_type_display:^9s} | "
+                    f"{row['actual_weight']:13.2f} | "
+                    f"{row['predicted_score']:14.2f}"
+                )
+            
+            self.logger.info(f"\n전체 분석 결과가 {output_path}에 저장되었습니다.")
             
         except Exception as e:
-            raise Exception(f"모델 학습 오류: {str(e)}")
+            self.logger.error(f"모델 학습 오류: {str(e)}")
+            raise
     
     def generate_recommendations(self, top_n: int = 300) -> pd.DataFrame:
-        """전체 사용자에 대한 추천 생성
-        
-        Args:
-            top_n (int): 각 사용자당 추천할 상품 수
-            
-        Returns:
-            pd.DataFrame: 추천 결과 데이터프레임
-        """
+        """전체 사용자에 대한 추천 생성"""
         if self.user_factors is None or self.item_factors is None:
             raise Exception("모델이 학습되지 않았습니다. train() 메서드를 먼저 실행하세요.")
         
@@ -269,7 +237,8 @@ class ALSRecommender:
             return recommendations_df
             
         except Exception as e:
-            raise Exception(f"추천 생성 오류: {str(e)}")
+            self.logger.error(f"추천 생성 오류: {str(e)}")
+            raise
     
     def cleanup(self) -> None:
         """리소스 정리"""
