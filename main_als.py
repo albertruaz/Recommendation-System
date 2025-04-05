@@ -6,7 +6,7 @@ import os
 import json
 import pandas as pd
 from database.recommendation_db import RecommendationDB
-from models.als import ALSRecommender
+from models.custom_implicit_als import CustomImplicitALS
 # from models.implicit_als import ImplicitALS
 from utils.logger import setup_logger
 
@@ -40,11 +40,11 @@ def main():
         interactions_df = load_interactions(days=days)
         
         # 모델 초기화 및 학습
-        model = ALSRecommender(
-            max_iter=CONFIG['als_params']['max_iter'],
-            reg_param=CONFIG['als_params']['reg_param'],
-            rank=CONFIG['als_params']['rank']
-        )
+        # model = CustomImplicitALS(
+        #     max_iter=CONFIG['als_params']['max_iter'],
+        #     reg_param=CONFIG['als_params']['reg_param'],
+        #     rank=CONFIG['als_params']['rank']
+        # )
 
         # model = ImplicitALS(
         #     max_iter=CONFIG['als_params']['max_iter'],

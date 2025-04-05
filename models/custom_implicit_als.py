@@ -14,11 +14,80 @@ import scipy.sparse as sp
 from implicit.cpu import _als
 from utils.logger import setup_logger
 
+import time
+
+
+
+##
+import numpy as np
+from scipy.sparse import csr_matrix
+
+def least_squares_python(Cui: csr_matrix, 
+                         X: np.ndarray, 
+                         Y: np.ndarray, 
+                         regularization: float):
+    """
+    - Cui: (n_users, n_items) CSR matrix
+           data[u, i] = confidence (alpha * rating 등)
+           'nonzero'라면 implicit feedback 있다고 간주
+    - X: (n_users, factors) -> 업데이트 대상
+    - Y: (n_items, factors) -> 고정된 행렬
+    - regularization: float
+    """
+    n_users, n_factors = X.shape
+    # (factors x factors) 행렬
+    YtY = Y.T @ Y
+    initA = YtY + regularization * np.eye(n_factors, dtype=Y.dtype)
+    initB = np.zeros(n_factors, dtype=Y.dtype)
+
+    # CSR 인덱스
+    indptr = Cui.indptr
+    indices = Cui.indices
+    data = Cui.data
+    
+    for u in range(n_users):
+        start = indptr[u]
+        end = indptr[u+1]
+        length = end - start
+        
+        if length == 0:
+            # 유저 u가 아무것도 클릭안했다면 0으로 초기화
+            X[u, :] = 0
+            continue
+        
+        # A, b 초기화
+        A = initA.copy()
+        b = initB.copy()
+
+        # 해당 유저의 nonzero 아이템들에 대해 A, b 업데이트
+        for idx in range(start, end):
+            i = indices[idx]
+            confidence = data[idx]
+
+            if confidence > 0:
+                # b += confidence * Y[i]
+                b += confidence * Y[i]
+            else:
+                # confidence가 음수면, -confidence 로 치환
+                confidence = -confidence
+
+            # A += (confidence - 1) * (Yi^T * Yi)
+            # np.outer(Y[i], Y[i]) = (factors x factors)
+            A += (confidence - 1) * np.outer(Y[i], Y[i])
+
+        # 선형시스템 A*x = b 해
+        x = np.linalg.solve(A, b)
+
+        X[u, :] = x
+
+##
+
+
 # 설정 파일 로드
 with open('config/config.json', 'r') as f:
     CONFIG = json.load(f)
 
-class ALSRecommender:
+class CustomImplicitALS:
     """ALS 기반 추천 시스템 클래스"""
     
     def __init__(self, max_iter: int = 15, reg_param: float = 0.1,
@@ -124,26 +193,45 @@ class ALSRecommender:
             
             # 3. ALS 반복 학습
             for iteration in range(self.max_iter):
-                # (1) 아이템 행렬 갱신
+                
                 YtY = Y.T @ Y
-                _als.least_squares(
+                start = time.time()
+                least_squares_python(
                     P,
                     X,   # 업데이트할 행렬
                     Y,   # 고정된 행렬
-                    self.reg_param,
-                    num_threads=0
+                    self.reg_param
                 )
-                
-                # (2) 사용자 행렬 갱신
-                XtX = X.T @ X
-                _als.least_squares(
+                least_squares_python(
                     Pt,
                     Y,   # 업데이트할 행렬
                     X,   # 고정된 행렬
-                    self.reg_param,
-                    num_threads=0
+                    self.reg_param
                 )
+                end = time.time()
+                print(f"직접구현 걸린 시간: {end - start:.4f}초")
                 
+                # start = time.time()
+                # _als.least_squares(
+                #     P,
+                #     X,   # 업데이트할 행렬
+                #     Y,   # 고정된 행렬
+                #     self.reg_param,
+                #     num_threads=0
+                # )
+                # # (2) 사용자 행렬 갱신
+                # XtX = X.T @ X
+                # _als.least_squares(
+                #     Pt,
+                #     Y,   # 업데이트할 행렬
+                #     X,   # 고정된 행렬
+                #     self.reg_param,
+                #     num_threads=0
+                # )
+                # end = time.time()
+                # print(f"라이브러리 걸린 시간: {end - start:.4f}초")
+
+
                 # 현재 RMSE 계산
                 pred = X @ Y.T
                 mask = P.toarray() > 0
