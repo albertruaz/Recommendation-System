@@ -5,8 +5,9 @@
 import os
 from typing import Optional
 from contextlib import contextmanager
-import mysql.connector
-from mysql.connector import pooling
+# import mysql.connector
+# from mysql.connector import pooling
+
 from sqlalchemy import create_engine, Engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
@@ -68,7 +69,7 @@ class DBConnector:
             self._setup_ssh_tunnel()
             
             # MySQL 연결 URL 생성 (SSH 터널을 통한 연결)
-            db_url = (f"mysql+mysqlconnector://{self.db_config['user']}:{self.db_config['password']}"
+            db_url = (f"mysql+pymysql://{self.db_config['user']}:{self.db_config['password']}"
                      f"@127.0.0.1:{self._tunnel.local_bind_port}/{self.db_config['database']}")
             
             # 엔진 생성

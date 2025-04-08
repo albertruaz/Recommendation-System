@@ -30,17 +30,21 @@
 
 ## 환경 설정
 
-### 1. Conda 환경 생성 및 활성화
+### 1. Conda 환경 설정
 
 ```bash
-# 환경 생성
-conda create -n recommendation python=3.8
-conda activate recommendation
+# Conda 환경 생성
+conda create -n als python=3.9.21
+conda activate als
+
+# Buffalo 수동 설치 (소스코드에서 직접 설치)
+git clone https://github.com/kakao/buffalo.git
+cd buffalo
+pip install .
+cd ..
 
 # 필요한 패키지 설치
-conda install -c conda-forge pandas numpy scipy
-conda install -c conda-forge implicit
-conda install -c conda-forge pymysql sqlalchemy python-dotenv
+pip install -r requirements.txt
 ```
 
 ### 2. 환경 변수 설정

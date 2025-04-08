@@ -109,10 +109,13 @@ class RecommendationDB:
                     FIELD(interaction_type, 'purchase', 'cart', 'like', 'view'),
                     view_type
             """
+
+            print("시작")
             
             with self.db.get_connection() as conn:
+
                 df = pd.read_sql(text(query), conn, params={'days': days})
-                
+                print("성공")
                 # 데이터 타입 변환 및 NULL 값 제거
                 df['member_id'] = pd.to_numeric(df['member_id'], errors='coerce').astype('Int64')
                 df['product_id'] = pd.to_numeric(df['product_id'], errors='coerce').astype('Int64')

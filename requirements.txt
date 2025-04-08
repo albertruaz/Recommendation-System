@@ -1,10 +1,24 @@
-# 기본 데이터 처리
-pandas>=2.2.0
-numpy>=1.26.0
+# 아래 패키지들은 conda environment로 설치됨
+# python==3.9.21
+
+# 수동 설치 필요 (pip install . 로 설치)
+# buffalo==2.0.5
 
 # 추천 시스템
-implicit>=0.7.0
-scipy>=1.15.0
+# implicit>=0.7.0
+# scipy>=1.15.0
+
+# 나머지 필수 패키지들
+numpy==1.24.3
+pandas==2.2.3
+scipy==1.10.1
+implicit==0.7.2
+h5py==3.9.0
+python-dotenv==1.1.0
+sqlalchemy==2.0.40
+pymysql==1.1.1
+tqdm==4.67.1
+colorlog==6.9.0
 
 # 데이터베이스
 mysql-connector-python>=9.2.0
@@ -12,6 +26,4 @@ PyMySQL>=1.1.0
 SQLAlchemy>=2.0.0
 
 # 유틸리티
-python-dotenv>=1.0.0
-python-json-logger>=3.3.0
-colorlog>=4.7.0 
+python-json-logger>=3.3.0 

@@ -6,8 +6,10 @@ import os
 import json
 import pandas as pd
 from database.recommendation_db import RecommendationDB
-from models.custom_implicit_als import CustomImplicitALS
 # from models.implicit_als import ImplicitALS
+# from models.custom_implicit_als import CustomImplicitALS
+
+from models.buffalo_als import BuffaloALS
 from utils.logger import setup_logger
 
 # 설정 파일 로드
@@ -19,6 +21,7 @@ logger = setup_logger('main')
 
 def load_interactions(days: int = 30) -> pd.DataFrame:
     """데이터베이스에서 상호작용 데이터 로드"""
+    logger.info(f"days: {days}")
     db = RecommendationDB()
     interactions = db.get_user_item_interactions(days=days)
     
@@ -31,6 +34,7 @@ def load_interactions(days: int = 30) -> pd.DataFrame:
 
 def main():
     # 설정 로드
+    logger.info(f"Start ALS")
     days = CONFIG['default_params']['days']
     top_n = CONFIG['default_params']['top_n']
     output_dir = CONFIG['default_params']['output_dir']
@@ -52,6 +56,13 @@ def main():
         #     rank=CONFIG['als_params']['rank'],
         #     alpha=CONFIG['alpha']
         # )
+
+        # Buffalo ALS 모델 사용 (명시적 피드백)
+        model = BuffaloALS(
+            max_iter=CONFIG['als_params']['max_iter'],
+            reg_param=CONFIG['als_params']['reg_param'],
+            rank=CONFIG['als_params']['rank']
+        )
         
         # 모델 학습
         model.train(interactions_df)
