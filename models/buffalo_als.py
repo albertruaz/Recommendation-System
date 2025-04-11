@@ -37,26 +37,23 @@ class BuffaloALS(BaseALS):
         self.model = None
         self.data = None
     
-    def _get_interaction_weight(self, row: pd.Series) -> float:
-        """상호작용 타입에 따른 가중치 반환"""
-        interaction_type = row["interaction_type"]
-        view_type = f"view_type_{int(row['view_type'])}" if pd.notna(row["view_type"]) else None
+    def prepare_matrices(self, interactions_df: pd.DataFrame):
+        """상호작용 데이터를 Buffalo 라이브러리용 행렬로 변환
         
-        if view_type and view_type in CONFIG["interaction_weights"]:
-            return CONFIG["interaction_weights"][view_type]
-        elif interaction_type in CONFIG["interaction_weights"]:
-            return CONFIG["interaction_weights"][interaction_type]
-        return 1.0
-    
-    def _prepare_matrices(self, interactions_df: pd.DataFrame) -> None:
-        """상호작용 데이터를 행렬 형태로 변환"""
-        # 인덱스 매핑 생성
-        self._prepare_indices(interactions_df)
+        부모 클래스의 prepare_matrices를 오버라이드하여 
+        Buffalo 라이브러리에 맞는 MatrixMarket 객체를 생성합니다.
         
-        # 가중치 계산
-        interactions_df["weight"] = interactions_df.apply(self._get_interaction_weight, axis=1)
+        Args:
+            interactions_df (pd.DataFrame): 상호작용 데이터프레임
+            
+        Returns:
+            MatrixMarket: Buffalo 라이브러리용 행렬 객체
+        """
+        # 기본 행렬 변환을 위해 부모 메서드 호출 (결과는 사용하지 않음)
+        _ = super().prepare_matrices(interactions_df)
         
-        # 사용자-상품별로 가중치 합산
+        # BuffaloALS 전용 구현: MatrixMarket 생성
+        # 가중치 계산 (이미 부모 클래스에서 계산됨)
         aggregated_df = interactions_df.groupby(
             ["member_id", "product_id"]
         )["weight"].max().reset_index()
@@ -98,60 +95,31 @@ class BuffaloALS(BaseALS):
         als_opt.compute_loss_on_training = True
         als_opt.save_factors = True
         als_opt.model_path = "output/als_model"
-
         
         # MatrixMarket 객체 생성
-        self.data = MatrixMarket(als_opt)
-        self.data.create()
+        data = MatrixMarket(als_opt)
+        data.create()
         
         # 임시 파일 삭제
         if os.path.exists(temp_mm_file):
             os.remove(temp_mm_file)
         
-        # 행렬 정보 로깅
-        self.logger.info(f"\n행렬 변환 결과:")
-        self.logger.info(f"- 행렬 크기: {len(self.user2idx)}x{len(self.item2idx)}")
-        self.logger.info(f"- 비영요소 수: {len(aggregated_df)}")
-        self.logger.info(f"- 밀도: {len(aggregated_df) / (len(self.user2idx) * len(self.item2idx)):.4%}")
-        
-        # 샘플 데이터 출력 (처음 10x10 행렬)
-        sample_size = min(10, sparse_matrix.shape[0], sparse_matrix.shape[1])
-        # COO를 CSR로 변환하여 인덱싱 가능하게 만듦
-        sparse_matrix_csr = sparse_matrix.tocsr()
-        sample_matrix = sparse_matrix_csr[:sample_size, :sample_size].toarray()
-        
-        # 행과 열 인덱스 준비
-        row_indices = [f"User {self.idx2user[i]}" for i in range(sample_size)]
-        col_indices = [f"Item {self.idx2item[i]}" for i in range(sample_size)]
-        
-        # 행렬 출력 준비
-        matrix_str = "\n행렬 샘플 (10x10):\n"
-        
-        # 열 헤더 추가
-        max_user_len = max(len(str(u)) for u in row_indices)
-        matrix_str += " " * (max_user_len + 2)
-        for col in col_indices:
-            matrix_str += f"{col:>10} "
-        matrix_str += "\n"
-        
-        # 데이터 행 추가
-        for i, user in enumerate(row_indices):
-            matrix_str += f"{user:<{max_user_len}} |"
-            for j in range(sample_size):
-                matrix_str += f"{sample_matrix[i,j]:10.3f} "
-            matrix_str += "\n"
-        
-        self.logger.info(matrix_str)
+        return data
     
-    def train(self, interactions_df: pd.DataFrame) -> None:
-        """모델 학습"""
+    def train(self, interactions_df, matrix_data) -> None:
+        """모델 학습
+        
+        Args:
+            interactions_df: 상호작용 데이터프레임
+            matrix_data: 미리 준비된 행렬 데이터 (MatrixMarket 객체)
+        """
         try:
             self.logger.info("Buffalo ALS 모델 학습 시작")
             
-            # 데이터 준비
-            self._prepare_matrices(interactions_df)
+            # 데이터 설정 - 항상 준비된 행렬 데이터 사용
+            self.data = matrix_data
             
-            # ALSOption을 사용하여 기본 옵션 가져오기
+            # 모델 생성 및 학습
             als_opt = ALSOption().get_default_option()
             
             # 사용자 지정 파라미터로 업데이트 (타입 변환 추가)
@@ -161,14 +129,11 @@ class BuffaloALS(BaseALS):
             als_opt.reg_i = float(self.reg_param)  # 아이템 정규화 계수
             als_opt.alpha = float(self.alpha)  # 신뢰도 가중치
             
-            # 추가 설정
+            # 기타 설정
             als_opt.num_workers = 4  # 스레드 수
             als_opt.validation = aux.Option({"topk": 10})  # 검증 설정
             als_opt.compute_loss_on_training = True  # 학습 중 손실 계산
-            als_opt.save_factors = True  # 모델 저장
-            als_opt.model_path = "output/als_model"  # 모델 저장 경로
             
-            # 모델 생성 및 학습
             self.model = ALS(als_opt)
             self.model.initialize()  # 초기화 필요
             self.model.train(self.data)
@@ -179,66 +144,8 @@ class BuffaloALS(BaseALS):
             
             self.logger.info("모델 학습 완료")
             
-            # 학습 결과 분석
-            self.logger.info("\n=== 학습 결과 분석 ===")
-            
-            # 원본 데이터에서 실제 가중치 정보 추출
-            analysis_df = interactions_df.copy()
-            analysis_df['actual_weight'] = analysis_df.apply(self._get_interaction_weight, axis=1)
-            
-            # 예측값 계산
-            predictions = []
-            for _, row in analysis_df.iterrows():
-                user_idx = self.user2idx[row['member_id']]
-                item_idx = self.item2idx[row['product_id']]
-                pred_score = np.dot(self.user_factors[user_idx], self.item_factors[item_idx])
-                predictions.append({
-                    'user_id': row['member_id'],
-                    'item_id': row['product_id'],
-                    'interaction_type': row['interaction_type'],
-                    'view_type': row['view_type'] if 'view_type' in row else None,
-                    'actual_weight': row['actual_weight'],
-                    'predicted_score': pred_score
-                })
-            
-            # 결과를 DataFrame으로 변환하고 정렬
-            result_df = pd.DataFrame(predictions)
-            result_df = result_df.sort_values('actual_weight', ascending=False)
-            
-            # 출력 디렉토리 생성
-            os.makedirs('output', exist_ok=True)
-            
-            # CSV 파일로 저장
-            output_path = 'output/weight_analysis.csv'
-            result_df.to_csv(output_path, index=False)
-            
-            # 상위 100개 결과 로깅
-            self.logger.info("\n=== 상위 100개 가중치 비교 ===")
-            self.logger.info("User ID | Item ID | Type | View Type | Actual Weight | Predicted Score")
-            self.logger.info("-" * 75)
-            
-            for _, row in result_df.head(100).iterrows():
-                view_type_str = f"type_{int(row['view_type'])}" if pd.notna(row['view_type']) else "N/A"
-                view_type_display = view_type_str if row['interaction_type'] == 'view' else "-"
-                
-                self.logger.info(
-                    f"{row['user_id']:7d} | "
-                    f"{row['item_id']:7d} | "
-                    f"{row['interaction_type']:<6s} | "
-                    f"{view_type_display:^9s} | "
-                    f"{row['actual_weight']:13.2f} | "
-                    f"{row['predicted_score']:14.2f}"
-                )
-            
-            # 상호작용 타입별 통계
-            self.logger.info("\n=== 상호작용 타입별 통계 ===")
-            type_stats = result_df.groupby('interaction_type').agg({
-                'actual_weight': ['mean', 'min', 'max', 'count'],
-                'predicted_score': ['mean', 'min', 'max']
-            }).round(3)
-            
-            self.logger.info("\n" + str(type_stats))
-            self.logger.info(f"\n전체 분석 결과가 {output_path}에 저장되었습니다.")
+            # 학습 결과 분석 및 로깅
+            self._log_training_results(interactions_df)
             
         except Exception as e:
             self.logger.error(f"모델 학습 오류: {str(e)}")

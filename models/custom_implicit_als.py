@@ -114,27 +114,14 @@ class CustomImplicitALS:
         # 로거 설정
         self.logger = setup_logger('als')
     
-    def _calculate_preference(self, row: pd.Series) -> float:
-        """상호작용 타입에 따른 선호도 점수 계산"""
-        interaction_type = row["interaction_type"]
-        view_type = f"view_type_{int(row['view_type'])}" if pd.notna(row["view_type"]) else None
+    def prepare_matrices(self, interactions_df: pd.DataFrame) -> sp.csr_matrix:
+        """
+        상호작용 데이터를 선호도 행렬로 변환
         
-        # config에서 정의된 가중치 가져오기
-        weight = CONFIG["interaction_weights"].get(view_type or interaction_type, 0.0)
-        
-        # min-max 정규화로 0~1 사이 값으로 변환
-        max_weight = max(CONFIG["interaction_weights"].values())
-        min_weight = min(CONFIG["interaction_weights"].values())
-        
-        if max_weight == min_weight:
-            return weight / max_weight  # 모든 가중치가 같은 경우
-            
-        p_ui = (weight - min_weight) / (max_weight - min_weight)
-        return p_ui
-    
-    def _prepare_matrices(self, interactions_df: pd.DataFrame) -> sp.csr_matrix:
-        """상호작용 데이터를 선호도 행렬로 변환"""
-        # 1. 유니크 사용자/상품 인덱싱
+        이 메서드는 부모 클래스의 prepare_matrices를 오버라이드하여,
+        선호도 점수를 0~1 사이로 정규화하여 행렬로 변환합니다.
+        """
+        # 인덱스 매핑 생성
         unique_users = sorted(interactions_df["member_id"].unique())
         unique_items = sorted(interactions_df["product_id"].unique())
         
@@ -145,8 +132,26 @@ class CustomImplicitALS:
         
         self.logger.info(f"사용자 수: {len(unique_users)}, 아이템 수: {len(unique_items)}")
         
+        # 선호도 점수 계산 함수
+        def calculate_preference(row):
+            interaction_type = row["interaction_type"]
+            view_type = f"view_type_{int(row['view_type'])}" if pd.notna(row["view_type"]) else None
+            
+            # config에서 정의된 가중치 가져오기
+            weight = CONFIG["interaction_weights"].get(view_type or interaction_type, 0.0)
+            
+            # min-max 정규화로 0~1 사이 값으로 변환
+            max_weight = max(CONFIG["interaction_weights"].values())
+            min_weight = min(CONFIG["interaction_weights"].values())
+            
+            if max_weight == min_weight:
+                return weight / max_weight  # 모든 가중치가 같은 경우
+                
+            p_ui = (weight - min_weight) / (max_weight - min_weight)
+            return p_ui
+        
         # 2. 선호도 점수(p_ui) 계산
-        interactions_df["p_ui"] = interactions_df.apply(self._calculate_preference, axis=1)
+        interactions_df["p_ui"] = interactions_df.apply(calculate_preference, axis=1)
         
         # 3. (user, item) 쌍별로 집계
         aggregated_df = interactions_df.groupby(
@@ -177,14 +182,21 @@ class CustomImplicitALS:
         
         return P
     
-    def train(self, interactions_df: pd.DataFrame) -> None:
-        """모델 학습"""
+    def train(self, interactions_df, matrix_data) -> None:
+        """모델 학습
+        
+        Args:
+            interactions_df: 상호작용 데이터프레임
+            matrix_data: 준비된 선호도 행렬 (sparse matrix)
+        """
         try:
             self.logger.info("ALS 모델 학습 시작")
             
-            # 1. 선호도 행렬 준비
-            P = self._prepare_matrices(interactions_df)
-            Pt = P.T.tocsr()  # 전치행렬
+            # 준비된 선호도 행렬 사용
+            P = matrix_data
+            
+            # 전치행렬 생성
+            Pt = P.T.tocsr()
             
             # 2. 잠재 요인 행렬 초기화
             np.random.seed(self.random_state)
@@ -193,7 +205,6 @@ class CustomImplicitALS:
             
             # 3. ALS 반복 학습
             for iteration in range(self.max_iter):
-                
                 YtY = Y.T @ Y
                 start = time.time()
                 least_squares_python(
@@ -211,27 +222,6 @@ class CustomImplicitALS:
                 end = time.time()
                 print(f"직접구현 걸린 시간: {end - start:.4f}초")
                 
-                # start = time.time()
-                # _als.least_squares(
-                #     P,
-                #     X,   # 업데이트할 행렬
-                #     Y,   # 고정된 행렬
-                #     self.reg_param,
-                #     num_threads=0
-                # )
-                # # (2) 사용자 행렬 갱신
-                # XtX = X.T @ X
-                # _als.least_squares(
-                #     Pt,
-                #     Y,   # 업데이트할 행렬
-                #     X,   # 고정된 행렬
-                #     self.reg_param,
-                #     num_threads=0
-                # )
-                # end = time.time()
-                # print(f"라이브러리 걸린 시간: {end - start:.4f}초")
-
-
                 # 현재 RMSE 계산
                 pred = X @ Y.T
                 mask = P.toarray() > 0
@@ -242,54 +232,8 @@ class CustomImplicitALS:
             self.item_factors = Y
             self.logger.info("모델 학습 완료")
             
-            # 학습 결과 분석
-            self.logger.info("\n=== 학습 결과 분석 ===")
-            predictions = []
-            
-            # 실제 상호작용이 있는 데이터에 대해서만 분석
-            for _, row in interactions_df.iterrows():
-                user_idx = self.user2idx[row['member_id']]
-                item_idx = self.item2idx[row['product_id']]
-                actual_weight = self._calculate_preference(row)
-                pred_score = np.dot(self.user_factors[user_idx], self.item_factors[item_idx])
-                
-                predictions.append({
-                    'user_id': row['member_id'],
-                    'item_id': row['product_id'],
-                    'interaction_type': row['interaction_type'],
-                    'view_type': row['view_type'] if row['interaction_type'] == 'view' else None,
-                    'actual_weight': actual_weight,
-                    'predicted_score': pred_score
-                })
-            
-            # 결과를 DataFrame으로 변환하고 정렬
-            result_df = pd.DataFrame(predictions)
-            result_df = result_df.sort_values('actual_weight', ascending=False)
-            
-            # CSV 파일로 저장
-            output_path = 'output/weight_analysis.csv'
-            os.makedirs('output', exist_ok=True)
-            result_df.to_csv(output_path, index=False)
-            
-            # 상위 100개 결과 로깅
-            self.logger.info("\n=== 상위 100개 가중치 비교 ===")
-            self.logger.info("User ID | Item ID | Type | View Type | Actual Weight | Predicted Score")
-            self.logger.info("-" * 75)
-            
-            for _, row in result_df.head(100).iterrows():
-                view_type_str = f"type_{int(row['view_type'])}" if pd.notna(row['view_type']) else "N/A"
-                view_type_display = view_type_str if row['interaction_type'] == 'view' else "-"
-                
-                self.logger.info(
-                    f"{row['user_id']:7d} | "
-                    f"{row['item_id']:7d} | "
-                    f"{row['interaction_type']:<6s} | "
-                    f"{view_type_display:^9s} | "
-                    f"{row['actual_weight']:13.2f} | "
-                    f"{row['predicted_score']:14.2f}"
-                )
-            
-            self.logger.info(f"\n전체 분석 결과가 {output_path}에 저장되었습니다.")
+            # 학습 결과 분석 및 로깅
+            self._log_training_results(interactions_df)
             
         except Exception as e:
             self.logger.error(f"모델 학습 오류: {str(e)}")
