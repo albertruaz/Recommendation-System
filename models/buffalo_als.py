@@ -13,9 +13,9 @@ import scipy.sparse as sp
 import scipy.io
 from buffalo.algo.als import ALS
 from buffalo.data.mm import MatrixMarket, MatrixMarketOptions
+from buffalo.algo.options import ALSOption
 from buffalo.misc import aux
 from .base_als import BaseALS, CONFIG
-from buffalo.algo.options import ALSOption
 
 # numpy 출력 설정
 np.set_printoptions(threshold=np.inf, precision=3, suppress=True)
@@ -36,6 +36,35 @@ class BuffaloALS(BaseALS):
         self.alpha = alpha
         self.model = None
         self.data = None
+        
+        # ALS 옵션 초기화
+        self.als_opt = ALSOption().get_default_option()
+        
+        # 주요 하이퍼파라미터 설정
+        self.als_opt.d = int(rank)  # 잠재 요인 차원 수
+        self.als_opt.num_iters = int(max_iter)  # 반복 횟수
+        self.als_opt.reg_u = float(reg_param)  # 사용자 정규화 계수
+        self.als_opt.reg_i = float(reg_param)  # 아이템 정규화 계수
+        self.als_opt.alpha = float(alpha)  # 신뢰도 가중치
+        
+        # 학습 관련 설정
+        self.als_opt.num_workers = 4  # 스레드 수
+        self.als_opt.validation = aux.Option({
+            "topk": 10,
+            "num_workers": 4,
+            "metrics": ["ndcg@10", "map@10"]
+        })
+        self.als_opt.compute_loss_on_training = True
+        
+        # 모델 저장 관련 설정
+        self.als_opt.save_best = True
+        self.als_opt.save_factors = True
+        self.als_opt.model_path = "output/als_model"
+        
+        # early stopping 설정
+        self.als_opt.early_stopping_rounds = 3
+        
+        self.logger.info(f"BuffaloALS 초기화 - rank: {rank}, alpha: {alpha}, max_iter: {max_iter}, reg_param: {reg_param}")
     
     def prepare_matrices(self, interactions_df: pd.DataFrame):
         """상호작용 데이터를 Buffalo 라이브러리용 행렬로 변환
@@ -49,11 +78,10 @@ class BuffaloALS(BaseALS):
         Returns:
             MatrixMarket: Buffalo 라이브러리용 행렬 객체
         """
-        # 기본 행렬 변환을 위해 부모 메서드 호출 (결과는 사용하지 않음)
+        # 기본 행렬 변환을 위해 부모 메서드 호출
         _ = super().prepare_matrices(interactions_df)
         
-        # BuffaloALS 전용 구현: MatrixMarket 생성
-        # 가중치 계산 (이미 부모 클래스에서 계산됨)
+        # 가중치 계산된 데이터프레임 생성
         aggregated_df = interactions_df.groupby(
             ["member_id", "product_id"]
         )["weight"].max().reset_index()
@@ -75,29 +103,14 @@ class BuffaloALS(BaseALS):
         # MatrixMarket 형식으로 저장
         scipy.io.mmwrite(temp_mm_file, sparse_matrix)
         
-        # 옵션 객체 생성
-        als_opt = ALSOption().get_default_option()
-
-        # 주요 하이퍼파라미터 설정
-        als_opt.d = int(self.rank)
-        als_opt.num_iters = int(self.max_iter)
-        als_opt.reg_u = float(self.reg_param)
-        als_opt.reg_i = float(self.reg_param)
-        als_opt.alpha = float(self.alpha)
-
-        # 조기 종료 및 저장 옵션
-        als_opt.early_stopping_rounds = 3
-        als_opt.save_best = True  # 이거 안 넣으면 RuntimeError 발생함!
-
-        # 기타 설정
-        als_opt.num_workers = 4
-        als_opt.validation = aux.Option({"topk": 10})
-        als_opt.compute_loss_on_training = True
-        als_opt.save_factors = True
-        als_opt.model_path = "output/als_model"
+        # MatrixMarket 옵션 설정
+        mm_opt = MatrixMarketOptions().get_default_option()
+        mm_opt.input.main = temp_mm_file
+        mm_opt.data.tmp_dir = "temp"
+        os.makedirs(mm_opt.data.tmp_dir, exist_ok=True)
         
         # MatrixMarket 객체 생성
-        data = MatrixMarket(als_opt)
+        data = MatrixMarket(mm_opt)
         data.create()
         
         # 임시 파일 삭제
@@ -116,27 +129,19 @@ class BuffaloALS(BaseALS):
         try:
             self.logger.info("Buffalo ALS 모델 학습 시작")
             
-            # 데이터 설정 - 항상 준비된 행렬 데이터 사용
+            # 데이터 설정
             self.data = matrix_data
             
             # 모델 생성 및 학습
-            als_opt = ALSOption().get_default_option()
+            self.model = ALS(self.als_opt, data=self.data)
             
-            # 사용자 지정 파라미터로 업데이트 (타입 변환 추가)
-            als_opt.d = int(self.rank)  # 잠재 요인 차원 수
-            als_opt.num_iters = int(self.max_iter)  # 반복 횟수
-            als_opt.reg_u = float(self.reg_param)  # 사용자 정규화 계수
-            als_opt.reg_i = float(self.reg_param)  # 아이템 정규화 계수
-            als_opt.alpha = float(self.alpha)  # 신뢰도 가중치
+            # 데이터와 함께 초기화
+            self.logger.info("모델 초기화 중...")
+            self.model.initialize()
             
-            # 기타 설정
-            als_opt.num_workers = 4  # 스레드 수
-            als_opt.validation = aux.Option({"topk": 10})  # 검증 설정
-            als_opt.compute_loss_on_training = True  # 학습 중 손실 계산
-            
-            self.model = ALS(als_opt)
-            self.model.initialize()  # 초기화 필요
-            self.model.train(self.data)
+            # 학습 실행
+            self.logger.info("모델 학습 중...")
+            self.model.train()
             
             # 학습된 잠재 요인 저장
             self.user_factors = self.model.P
@@ -198,9 +203,9 @@ class BuffaloALS(BaseALS):
         
         # 임시 파일 삭제
         try:
-            if os.path.exists('temp/ratings.mtx'):
-                os.remove('temp/ratings.mtx')
             if os.path.exists('temp'):
+                for file in os.listdir('temp'):
+                    os.remove(os.path.join('temp', file))
                 os.rmdir('temp')
         except Exception as e:
             self.logger.warning(f"임시 파일 삭제 중 오류 발생: {str(e)}") 

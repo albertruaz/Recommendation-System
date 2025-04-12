@@ -19,7 +19,7 @@
   "buffalo_als": {
     "max_iter": 15,
     "reg_param": 0.1,
-    "rank": 3,
+    "rank": 20,
     "alpha": 25.0,
     "interaction_weights": {
       "impression1": 0.0,
