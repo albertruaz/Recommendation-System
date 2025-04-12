@@ -7,6 +7,7 @@
 # 추천 시스템
 # implicit>=0.7.0
 # scipy>=1.15.0
+pyspark==3.5.1
 
 # 나머지 필수 패키지들
 numpy==1.24.3
@@ -19,6 +20,7 @@ sqlalchemy==2.0.40
 pymysql==1.1.1
 tqdm==4.67.1
 colorlog==6.9.0
+
 
 # 데이터베이스
 mysql-connector-python>=9.2.0

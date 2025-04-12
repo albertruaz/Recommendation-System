@@ -68,6 +68,15 @@ def main():
                 rank=CONFIG['implicit_als']['rank'],
                 alpha=CONFIG['implicit_als']['alpha']
             )
+        elif model_type == 'pyspark_als':
+            # PySparkALS 모델 사용
+            from models.pyspark_als import PySparkALS
+            model = PySparkALS(
+                max_iter=CONFIG['pyspark_als']['max_iter'],
+                reg_param=CONFIG['pyspark_als']['reg_param'],
+                rank=CONFIG['pyspark_als']['rank'],
+                alpha=CONFIG['pyspark_als']['alpha']
+            )
         else:
             # 기본값: Buffalo ALS 모델 사용 (명시적 피드백)
             from models.buffalo_als import BuffaloALS

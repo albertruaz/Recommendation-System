@@ -48,6 +48,22 @@
       "review": 30.0
     }
   },
+  "pyspark_als": {
+    "max_iter": 15,
+    "reg_param": 0.1,
+    "rank": 10,
+    "alpha": 1.0,
+    "interaction_weights": {
+      "impression1": 0.0,
+      "impression2": 0.0,
+      "view1": 1.0,
+      "view2": 2.0,
+      "like": 5.0,
+      "cart": 7.0,
+      "purchase": 10.0,
+      "review": 10.0
+    }
+  },
   "default_params": {
     "days": 1,
     "top_n": 100,

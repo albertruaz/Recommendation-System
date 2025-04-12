@@ -1,32 +1,16 @@
-# Implicit ALS 기반 추천 시스템
+# ALS 기반 추천 시스템
 
-이 프로젝트는 Implicit ALS(Alternating Least Squares) 알고리즘을 사용하여 사용자-상품 추천을 생성하는 시스템입니다.
+ALS(Alternating Least Squares) 알고리즘을 사용하여 사용자-상품 추천을 생성하는 시스템입니다.
 
 ## 주요 기능
 
-### 1. 상호작용 기반 추천
+### 상호작용 기반 추천
 
-- 다양한 사용자-상품 상호작용 데이터 활용
-  - 조회 (view): 조회 횟수와 타입에 따른 가중치 적용
-  - 좋아요 (like): 상품에 대한 관심도 반영
-  - 장바구니 (cart): 구매 의도 반영
-  - 구매 (purchase): 실제 구매 행동 반영
-  - 리뷰 (review): 상품 사용 후기 반영
-
-### 2. 가중치 시스템
-
-- 상호작용 타입별 차등 가중치 적용
-  - 조회 타입별 가중치: 1.0 ~ 3.0
-  - 좋아요: 5.0
-  - 장바구니: 10.0
-  - 구매: 13.0
-  - 리뷰: 15.0
-
-### 3. 자동 로깅 시스템
-
-- 날짜별 로그 파일 자동 생성
-- 모든 실행 정보와 에러를 로그 파일에 기록
-- 로그 레벨별 구분된 메시지 관리
+- 조회 (view): 조회 횟수와 타입에 따른 가중치 적용
+- 좋아요 (like): 상품에 대한 관심도 반영
+- 장바구니 (cart): 구매 의도 반영
+- 구매 (purchase): 실제 구매 행동 반영
+- 리뷰 (review): 상품 사용 후기 반영
 
 ## 환경 설정
 
@@ -45,19 +29,6 @@ cd ..
 
 # 필요한 패키지 설치
 pip install -r requirements.txt
-```
-
-### 2. 환경 변수 설정
-
-`.env` 파일을 생성하고 다음 내용을 설정:
-
-```env
-# 데이터베이스 설정
-DB_HOST=your_host
-DB_PORT=your_port
-DB_USER=your_user
-DB_PASSWORD=your_password
-DB_NAME=your_database
 ```
 
 ## 설정 파일 (config/config.json)
