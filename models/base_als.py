@@ -70,7 +70,6 @@ class BaseALS(ABC):
         interaction_type = row["interaction_type"]
         model_type = CONFIG['model_type']
         interaction_weights = CONFIG[model_type]['interaction_weights']
-        
         if interaction_type in interaction_weights:
             return interaction_weights[interaction_type]
         return 1.0

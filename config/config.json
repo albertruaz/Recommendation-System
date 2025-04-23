@@ -1,5 +1,5 @@
 {
-  "model_type": "buffalo_als",
+  "model_type": "pyspark_als",
   "implicit_als": {
     "max_iter": 15,
     "reg_param": 0.1,
@@ -50,18 +50,17 @@
   },
   "pyspark_als": {
     "max_iter": 15,
-    "reg_param": 0.1,
-    "rank": 10,
-    "alpha": 1.0,
+    "reg_param": 0.001,
+    "rank": 15,
     "interaction_weights": {
-      "impression1": 0.0,
-      "impression2": 0.0,
-      "view1": 1.0,
-      "view2": 2.0,
-      "like": 5.0,
-      "cart": 7.0,
-      "purchase": 10.0,
-      "review": 10.0
+      "impression1": 1.0,
+      "impression2": 0.5,
+      "view1": 5.0,
+      "view2": 7.0,
+      "like": 10.0,
+      "cart": 15.0,
+      "purchase": 20.0,
+      "review": 20.0
     }
   },
   "default_params": {

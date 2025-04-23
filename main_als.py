@@ -45,7 +45,7 @@ def main():
     try:
         # 데이터 로드 (테스트 DB 사용)
         interactions_df = load_interactions(days=days, use_test_db=True)
-        
+
         # 모델 타입 확인 및 모델 초기화
         model_type = CONFIG['model_type']
         logger.info(f"사용할 모델: {model_type}")
@@ -74,8 +74,7 @@ def main():
             model = PySparkALS(
                 max_iter=CONFIG['pyspark_als']['max_iter'],
                 reg_param=CONFIG['pyspark_als']['reg_param'],
-                rank=CONFIG['pyspark_als']['rank'],
-                alpha=CONFIG['pyspark_als']['alpha']
+                rank=CONFIG['pyspark_als']['rank']
             )
         else:
             # 기본값: Buffalo ALS 모델 사용 (명시적 피드백)
