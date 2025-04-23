@@ -82,27 +82,30 @@ def least_squares_python(Cui: csr_matrix,
 
 ##
 
+# numpy 출력 설정
+np.set_printoptions(threshold=np.inf, precision=3, suppress=True)
 
-# 설정 파일 로드
-with open('config/config.json', 'r') as f:
-    CONFIG = json.load(f)
+##
 
 class CustomImplicitALS:
     """ALS 기반 추천 시스템 클래스"""
     
     def __init__(self, max_iter: int = 15, reg_param: float = 0.1,
-                 rank: int = 10, random_state: int = 42):
+                 rank: int = 10, random_state: int = 42,
+                 interaction_weights: dict = None):
         """
         Args:
             max_iter (int): 최대 반복 횟수
             reg_param (float): 정규화 파라미터
             rank (int): 잠재 요인 개수
             random_state (int): 랜덤 시드
+            interaction_weights (dict): 상호작용 타입별 가중치
         """
         self.max_iter = max_iter
         self.reg_param = reg_param
         self.rank = rank
         self.random_state = random_state
+        self.interaction_weights = interaction_weights
         
         self.user_factors = None  # X matrix
         self.item_factors = None  # Y matrix
@@ -137,12 +140,12 @@ class CustomImplicitALS:
             interaction_type = row["interaction_type"]
             view_type = f"view_type_{int(row['view_type'])}" if pd.notna(row["view_type"]) else None
             
-            # config에서 정의된 가중치 가져오기
-            weight = CONFIG["interaction_weights"].get(view_type or interaction_type, 0.0)
+            # 정의된 가중치 가져오기
+            weight = self.interaction_weights.get(view_type or interaction_type, 0.0)
             
             # min-max 정규화로 0~1 사이 값으로 변환
-            max_weight = max(CONFIG["interaction_weights"].values())
-            min_weight = min(CONFIG["interaction_weights"].values())
+            max_weight = max(self.interaction_weights.values())
+            min_weight = min(self.interaction_weights.values())
             
             if max_weight == min_weight:
                 return weight / max_weight  # 모든 가중치가 같은 경우

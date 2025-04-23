@@ -15,7 +15,7 @@ from buffalo.algo.als import ALS
 from buffalo.data.mm import MatrixMarket, MatrixMarketOptions
 from buffalo.algo.options import ALSOption
 from buffalo.misc import aux
-from .base_als import BaseALS, CONFIG
+from .base_als import BaseALS
 
 # numpy 출력 설정
 np.set_printoptions(threshold=np.inf, precision=3, suppress=True)
@@ -24,15 +24,18 @@ class BuffaloALS(BaseALS):
     """Buffalo ALS 기반 추천 시스템 클래스"""
     
     def __init__(self, max_iter: int = 15, reg_param: float = 0.1,
-                 rank: int = 100, alpha: float = 40):
+                 rank: int = 100, random_state: int = 42, alpha: float = 40,
+                 interaction_weights: dict = None):
         """
         Args:
             max_iter (int): 최대 반복 횟수
             reg_param (float): 정규화 파라미터
             rank (int): 잠재 요인 개수
+            random_state (int): 랜덤 시드
             alpha (float): 신뢰도 가중치 스케일링 파라미터
+            interaction_weights (dict): 상호작용 타입별 가중치
         """
-        super().__init__(max_iter, reg_param, rank)
+        super().__init__(max_iter, reg_param, rank, random_state, interaction_weights)
         self.alpha = alpha
         self.model = None
         self.data = None

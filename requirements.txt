@@ -28,4 +28,5 @@ PyMySQL>=1.1.0
 SQLAlchemy>=2.0.0
 
 # 유틸리티
-python-json-logger>=3.3.0 
+python-json-logger>=3.3.0
+wandb==0.16.5  # Weights & Biases for experiment tracking 

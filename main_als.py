@@ -74,7 +74,10 @@ def main():
             model = PySparkALS(
                 max_iter=CONFIG['pyspark_als']['max_iter'],
                 reg_param=CONFIG['pyspark_als']['reg_param'],
-                rank=CONFIG['pyspark_als']['rank']
+                rank=CONFIG['pyspark_als']['rank'],
+                interaction_weights=CONFIG['pyspark_als']['interaction_weights'],
+                max_prediction=50.0,  # 예측값 상한 설정
+                huber_delta=10.0      # Huber Loss의 델타값 설정
             )
         else:
             # 기본값: Buffalo ALS 모델 사용 (명시적 피드백)

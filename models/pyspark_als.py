@@ -7,6 +7,9 @@ PySpark ALS 추천 시스템 구현
 import numpy as np
 import pandas as pd
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.functions import udf, col, lit, when
+from pyspark.sql.types import FloatType
 from pyspark.ml.recommendation import ALS
 from pyspark.ml.evaluation import RegressionEvaluator
 import json
@@ -14,25 +17,79 @@ import os
 
 from models.base_als import BaseALS
 
-# 설정 파일 로드
-with open('config/config.json', 'r') as f:
-    CONFIG = json.load(f)
-
 class PySparkALS(BaseALS):
     """PySpark ALS 기반 추천 시스템 (Explicit Feedback)"""
-
+    
     def __init__(self,
                  max_iter: int = 15,
                  reg_param: float = 0.1,
                  rank: int = 10,
                  random_state: int = 42,
-                 alpha: float = 1.0):
+                 alpha: float = 1.0,
+                 interaction_weights: dict = None,
+                 max_prediction: float = 50.0,
+                 huber_delta: float = 10.0):
         super().__init__(max_iter, reg_param, rank, random_state)
-        # 이제 config에 정의된 interaction_weights를 그대로 가져옵니다.
-        self.interaction_weights = CONFIG['pyspark_als']['interaction_weights']
+        self.interaction_weights = interaction_weights or {
+            "impression1": 1.0,
+            "impression2": 0.5,
+            "view1": 5.0,
+            "view2": 7.0,
+            "like": 10.0,
+            "cart": 15.0,
+            "purchase": 20.0,
+            "review": 20.0
+        }
         self.alpha = alpha
         self.spark = None
         self.model = None
+        self.max_prediction = max_prediction  # 예측값 상한
+        self.huber_delta = huber_delta  # Huber Loss의 델타값
+    
+    def _apply_prediction_cap(self, predictions_df):
+        """예측값에 상한(cap)을 적용합니다.
+        
+        Args:
+            predictions_df: 예측값을 포함한 Spark DataFrame
+            
+        Returns:
+            상한이 적용된 Spark DataFrame
+        """
+        # 클래스 속성을 로컬 변수로 복사하여 UDF에서 참조하지 않도록 함
+        max_pred_value = float(self.max_prediction)
+        
+        # SQL 표현식을 사용하여 상한 적용 (UDF 대신)
+        return predictions_df.withColumn(
+            "prediction", 
+            F.when(col("prediction") > max_pred_value, max_pred_value)
+                     .otherwise(col("prediction"))
+        )
+    
+    def _calculate_huber_loss(self, predictions_df):
+        """Huber Loss를 계산합니다.
+        
+        Args:
+            predictions_df: 예측값과 실제값을 포함한 Spark DataFrame
+            
+        Returns:
+            float: 계산된 Huber Loss 값
+        """
+        # 로컬 변수로 복사
+        delta = float(self.huber_delta)
+        
+        # SQL 표현식을 사용하여 Huber Loss 계산 (UDF 없이)
+        result = predictions_df.withColumn(
+            "residual", F.abs(col("rating") - col("prediction"))
+        ).withColumn(
+            "huber_error",
+            F.when(col("residual") <= delta, 
+                  0.5 * col("residual") * col("residual"))
+             .otherwise(delta * (col("residual") - 0.5 * delta))
+        )
+        
+        # 평균 계산
+        huber_loss = result.agg(F.avg("huber_error")).collect()[0][0]
+        return huber_loss
     
     def prepare_matrices(self, interactions_df: pd.DataFrame):
         """상호작용 데이터를 PySpark DataFrame으로 변환"""
@@ -77,8 +134,11 @@ class PySparkALS(BaseALS):
         # 학습 & 평가
         self.model = als.fit(train_data)
         
-        # Train 데이터 평가
+        # Train 데이터 평가 - 예측값 상한 적용
         train_preds = self.model.transform(train_data)
+        train_preds = self._apply_prediction_cap(train_preds)
+        
+        # 기본 RMSE
         train_rmse = RegressionEvaluator(
             metricName="rmse",
             labelCol="rating",
@@ -86,14 +146,33 @@ class PySparkALS(BaseALS):
         ).evaluate(train_preds)
         self.logger.info(f"Train RMSE: {train_rmse:.4f}")
         
-        # Test 데이터 평가
+        # Huber Loss 계산
+        train_huber_loss = self._calculate_huber_loss(train_preds)
+        self.logger.info(f"Train Huber Loss (delta={self.huber_delta}): {train_huber_loss:.4f}")
+        
+        # Test 데이터 평가 - 예측값 상한 적용
         test_preds = self.model.transform(test_data)
+        test_preds = self._apply_prediction_cap(test_preds)
+        
+        # 기본 RMSE
         test_rmse = RegressionEvaluator(
             metricName="rmse",
             labelCol="rating",
             predictionCol="prediction"
         ).evaluate(test_preds)
         self.logger.info(f"Test RMSE: {test_rmse:.4f}")
+        
+        # Huber Loss 계산
+        test_huber_loss = self._calculate_huber_loss(test_preds)
+        self.logger.info(f"Test Huber Loss (delta={self.huber_delta}): {test_huber_loss:.4f}")
+        
+        # 평가 지표 저장
+        self.metrics = {
+            'train_rmse': train_rmse,
+            'train_huber_loss': train_huber_loss,
+            'test_rmse': test_rmse,
+            'test_huber_loss': test_huber_loss
+        }
         
         # 잠재 요인 추출 및 변환
         user_factors_df = self.model.userFactors.toPandas()
@@ -227,6 +306,25 @@ class PySparkALS(BaseALS):
             
             self.logger.info("\n" + str(type_stats))
             self.logger.info(f"\n전체 분석 결과가 {output_path}에 저장되었습니다.")
+            
+            # Huber Loss를 상호작용 타입별로 계산
+            delta = float(self.huber_delta)  # 지역 변수로 복사
+            
+            def huber_error(y_true, y_pred, delta_val):
+                residual = abs(y_true - y_pred)
+                if residual <= delta_val:
+                    return 0.5 * residual * residual
+                else:
+                    return delta_val * (residual - 0.5 * delta_val)
+            
+            result_df['huber_error'] = result_df.apply(
+                lambda row: huber_error(row['actual_weight'], row['predicted_score'], delta), 
+                axis=1
+            )
+            
+            huber_by_type = result_df.groupby('interaction_type')['huber_error'].mean()
+            self.logger.info("\n=== 상호작용 타입별 Huber Loss ===")
+            self.logger.info(huber_by_type)
             
         except Exception as e:
             self.logger.error(f"학습 결과 분석 중 오류 발생: {str(e)}")

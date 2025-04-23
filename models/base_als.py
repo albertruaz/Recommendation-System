@@ -13,26 +13,33 @@ import os
 from abc import ABC, abstractmethod
 from utils.logger import setup_logger
 
-# 설정 파일 로드
-with open('config/config.json', 'r') as f:
-    CONFIG = json.load(f)
-
 class BaseALS(ABC):
     """ALS 기반 추천 시스템의 기본 클래스"""
     
     def __init__(self, max_iter: int = 15, reg_param: float = 0.1,
-                 rank: int = 10, random_state: int = 42):
+                 rank: int = 10, random_state: int = 42, interaction_weights: dict = None):
         """
         Args:
             max_iter (int): 최대 반복 횟수
             reg_param (float): 정규화 파라미터
             rank (int): 잠재 요인 개수
             random_state (int): 랜덤 시드
+            interaction_weights (dict): 상호작용 타입별 가중치
         """
         self.max_iter = max_iter
         self.reg_param = reg_param
         self.rank = rank
         self.random_state = random_state
+        self.interaction_weights = interaction_weights or {
+            "impression1": 0.0,
+            "impression2": 0.0,
+            "view1": 1.0,
+            "view2": 2.0,
+            "like": 5.0,
+            "cart": 7.0,
+            "purchase": 10.0,
+            "review": 10.0
+        }
         
         self.user_factors = None
         self.item_factors = None
@@ -68,10 +75,8 @@ class BaseALS(ABC):
             float: 계산된 가중치
         """
         interaction_type = row["interaction_type"]
-        model_type = CONFIG['model_type']
-        interaction_weights = CONFIG[model_type]['interaction_weights']
-        if interaction_type in interaction_weights:
-            return interaction_weights[interaction_type]
+        if interaction_type in self.interaction_weights:
+            return self.interaction_weights[interaction_type]
         return 1.0
     
     def prepare_matrices(self, interactions_df: pd.DataFrame):

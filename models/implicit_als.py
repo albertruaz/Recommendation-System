@@ -2,7 +2,6 @@
 Implicit ALS 추천 시스템 모델
 
 이 모듈은 Implicit ALS를 사용하여 사용자-상품 추천을 생성하는 클래스를 제공합니다.
-상호작용 가중치는 config/rating_weights.py에 정의되어 있습니다.
 """
 
 import json
@@ -10,22 +9,19 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from implicit.als import AlternatingLeastSquares
-from .base_als import BaseALS, CONFIG
+from .base_als import BaseALS
 import os
 
 # numpy 출력 설정
 np.set_printoptions(threshold=np.inf, precision=3, suppress=True)
 
-# 설정 파일 로드
-with open('config/config.json', 'r') as f:
-    CONFIG = json.load(f)
-
 class ImplicitALS(BaseALS):
     """Implicit ALS 기반 추천 시스템 클래스"""
     
     def __init__(self, max_iter: int = 15, reg_param: float = 0.1,
-                 rank: int = 100, alpha: float = 40):
-        super().__init__(max_iter, reg_param, rank)
+                 rank: int = 100, random_state: int = 42, alpha: float = 40,
+                 interaction_weights: dict = None):
+        super().__init__(max_iter, reg_param, rank, random_state, interaction_weights)
         self.alpha = alpha
         self.model = None
         self.train_matrix = None
