@@ -12,6 +12,7 @@ import scipy.io
 import os
 from abc import ABC, abstractmethod
 from utils.logger import setup_logger
+import gc  # garbage collector 추가
 
 class BaseALS(ABC):
     """ALS 기반 추천 시스템의 기본 클래스"""
@@ -62,6 +63,20 @@ class BaseALS(ABC):
         self.idx2item = unique_items
         
         self.logger.info(f"사용자 수: {len(unique_users)}, 아이템 수: {len(unique_items)}")
+        
+        # 메모리 관리를 위해 기존 매핑 정리
+        self.user2idx.clear()
+        self.item2idx.clear()
+        self.idx2user = []
+        self.idx2item = []
+        
+        self.user2idx = {user: i for i, user in enumerate(unique_users)}
+        self.item2idx = {item: i for i, item in enumerate(unique_items)}
+        self.idx2user = unique_users
+        self.idx2item = unique_items
+        
+        # 메모리 캐시 정리
+        gc.collect()
     
     def _get_interaction_weight(self, row: pd.Series) -> float:
         """상호작용 타입에 따른 가중치 반환
@@ -183,6 +198,9 @@ class BaseALS(ABC):
         self.item2idx = {}
         self.idx2item = []
         self.logger.info("리소스 정리 완료")
+        
+        # 메모리 정리
+        gc.collect()
     
     def _log_training_results(self, interactions_df: pd.DataFrame, top_k: int = 20) -> None:
         """학습 결과를 분석하고 로그로 출력합니다.

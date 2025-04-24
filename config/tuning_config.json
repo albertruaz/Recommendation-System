@@ -48,9 +48,9 @@
     }
   },
   "pyspark_als": {
-    "max_iter": [10, 15],
-    "reg_param": [0.1, 0.05],
-    "rank": [10, 20],
+    "max_iter": [15, 20, 25, 30],
+    "reg_param": [0.01, 0.005, 0.001],
+    "rank": [40, 50, 60],
     "alpha": [1.0],
     "interaction_weights": {
       "impression1": 1.0,
