@@ -532,12 +532,25 @@ def main():
                 pc_data.append(row_data)
             
             # Parallel Coordinates 차트 생성
-            parallel_coords = wandb.plot.parallel_coordinates(
-                table_data=pc_data,
-                columns=pc_columns,
-                title="Hyperparameter Tuning Comparison"
+            try:
+                parallel_coords = wandb.plot.parallel_coordinates(
+                    table_data=pc_data,
+                    columns=pc_columns,
+                    title="Hyperparameter Tuning Comparison"
+                )
+                run.log({"parallel_coordinates": parallel_coords})
+            except Exception as e:
+                logger.warning(f"Parallel coordinates 플롯 생성 실패: {str(e)}")
+                logger.info("대체 시각화를 위해 데이터를 CSV로 저장합니다.")
+            
+            # 튜닝 결과를 CSV로 명시적으로 저장 (wandb가 실패해도 로컬에 백업)
+            # 현재 시간을 파일명에 포함하여 기존 파일을 덮어쓰지 않음
+            local_backup_path = os.path.join(
+                TUNING_CONFIG['default_params']['output_dir'],
+                f"tuning_results_backup_{model_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             )
-            run.log({"parallel_coordinates": parallel_coords})
+            results_df.to_csv(local_backup_path, index=False)
+            logger.info(f"튜닝 결과 백업이 {local_backup_path}에 저장되었습니다.")
             
             # 하이퍼파라미터별 성능 비교 차트
             # 1. RMSE/Huber Loss를 기준으로 한 하이퍼파라미터 영향도 분석
