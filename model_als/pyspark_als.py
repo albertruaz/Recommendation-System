@@ -86,9 +86,9 @@ class PySparkALS(BaseALS):
         filtered = interactions_df[interactions_df['rating'] > 0].copy()
 
         # 데이터 양이 너무 많은 경우 샘플링
-        if len(filtered) > max_sample_size:
-            self.logger.info(f"데이터가 너무 많아 샘플링합니다: {len(filtered)}개 → {max_sample_size}개")
-            filtered = filtered.sample(n=max_sample_size, random_state=self.random_state)
+        # if len(filtered) > max_sample_size:
+        #     self.logger.info(f"데이터가 너무 많아 샘플링합니다: {len(filtered)}개 → {max_sample_size}개")
+        #     filtered = filtered.sample(n=max_sample_size, random_state=self.random_state)
         
         self.filtered_interactions_df = filtered
         

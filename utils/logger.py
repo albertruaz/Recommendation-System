@@ -51,66 +51,145 @@ def setup_logger(name='recommendation'):
     
     return logger
 
-def overall_log(train_result, test_result):
+def overall_log(run_id, train_result, test_result, als_config=None):
     """
     ALS 실행 결과를 JSON 형식으로 기록
     
     Args:
+        run_id: 실행 ID (timestamp_uuid 형식)
         train_result: 학습 데이터 평가 결과
         test_result: 테스트 데이터 평가 결과
+        als_config: ALS 설정 (None인 경우 파일에서 로드)
     """
     # 로그 파일 경로
     log_dir = 'logs'
     os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, 'overall_als.log')
+    config_log_file = os.path.join(log_dir, 'overall_als_config.log')
+    result_log_file = os.path.join(log_dir, 'overall_als_result.log')
     
-    # name 생성 (현재 날짜/시간 + UUID)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    unique_id = str(uuid.uuid4())[:8]  # UUID의 첫 8자만 사용
-    run_id = f"{timestamp}_{unique_id}"
+    # ALS 설정 불러오기 (전달받지 않은 경우)
+    if als_config is None:
+        config_path = 'config/als_config.json'
+        try:
+            with open(config_path, 'r') as f:
+                als_config = json.load(f)
+        except Exception as e:
+            als_config = {"error": f"설정 파일 로드 실패: {str(e)}"}
     
-    # ALS 설정 불러오기
-    config_path = 'config/als_config.json'
-    try:
-        with open(config_path, 'r') as f:
-            als_config = json.load(f)
-    except Exception as e:
-        als_config = {"error": f"설정 파일 로드 실패: {str(e)}"}
+    # 로그 데이터 구성 - 설정 로그
+    config_log_data = {
+        "name": run_id,
+        "als_config": als_config
+    }
     
-    # 로그 데이터 구성
-    log_data = {
+    # 로그 데이터 구성 - 결과 로그
+    result_log_data = {
         "name": run_id,
         "check": train_result is not None,  # 학습 결과가 있으면 성공으로 간주
-        "als_config": als_config,
         "train_result": train_result,
         "test_result": test_result
     }
     
-    # 파일에 로그 추가
+    # 설정 로그 파일에 로그 추가
     try:
         # 기존 로그 읽기
-        existing_logs = []
-        if os.path.exists(log_file):
-            with open(log_file, 'r', encoding='utf-8') as f:
+        existing_config_logs = []
+        if os.path.exists(config_log_file):
+            with open(config_log_file, 'r', encoding='utf-8') as f:
                 content = f.read().strip()
                 if content:
-                    # 각 줄을 JSON 객체로 파싱
-                    for line in content.split('\n'):
-                        if line.strip():  # 빈 줄 무시
-                            existing_logs.append(json.loads(line))
+                    try:
+                        # JSON 배열 형식으로 파싱 시도
+                        if content.startswith('[') and content.endswith(']'):
+                            existing_config_logs = json.loads(content)
+                        else:
+                            # 콤마로 구분된 JSON 객체들을 처리
+                            json_str = '[' + content + ']'
+                            try:
+                                existing_config_logs = json.loads(json_str)
+                            except json.JSONDecodeError:
+                                # 콤마 없이 개별 JSON 객체들을 분리하여 처리
+                                for line in content.split('\n\n'):
+                                    if line.strip():
+                                        try:
+                                            obj = json.loads(line.strip())
+                                            existing_config_logs.append(obj)
+                                        except json.JSONDecodeError:
+                                            print(f"JSON 파싱 오류 발생: {line[:100]}...")
+                    except json.JSONDecodeError as e:
+                        print(f"설정 로그 파일 파싱 오류: {str(e)}")
         
-        # 새 로그 추가
-        existing_logs.append(log_data)
+        # 새 로그를 맨 앞에 추가
+        existing_config_logs.insert(0, config_log_data)
         
-        # 파일에 저장 - 들여쓰기와 줄바꿈 포맷으로 저장
-        with open(log_file, 'w', encoding='utf-8') as f:
-            for log_entry in existing_logs:
-                # 각 로그 항목을 들여쓰기된 JSON으로 변환하고 줄바꿈 추가
+        # 파일에 저장 - JSON 배열 형식으로 저장
+        with open(config_log_file, 'w', encoding='utf-8') as f:
+            f.write('[\n')
+            for i, log_entry in enumerate(existing_config_logs):
+                # 각 로그 항목을 들여쓰기된 JSON으로 변환
                 formatted_json = json.dumps(log_entry, ensure_ascii=False, indent=2)
-                f.write(formatted_json + '\n\n')  # 로그 항목 사이에 빈 줄 추가
+                f.write(formatted_json)
+                
+                # 마지막 항목이 아니면 콤마 추가
+                if i < len(existing_config_logs) - 1:
+                    f.write(',\n')
+                else:
+                    f.write('\n')
+            f.write(']\n')
         
-        # 로깅 성공 메시지
-        print(f"실행 로그가 {log_file}에 저장되었습니다.")
+        print(f"설정 로그가 {config_log_file}에 저장되었습니다.")
         
     except Exception as e:
-        print(f"로그 저장 중 오류 발생: {str(e)}")
+        print(f"설정 로그 저장 중 오류 발생: {str(e)}")
+    
+    # 결과 로그 파일에 로그 추가
+    try:
+        # 기존 로그 읽기
+        existing_result_logs = []
+        if os.path.exists(result_log_file):
+            with open(result_log_file, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if content:
+                    try:
+                        # JSON 배열 형식으로 파싱 시도
+                        if content.startswith('[') and content.endswith(']'):
+                            existing_result_logs = json.loads(content)
+                        else:
+                            # 콤마로 구분된 JSON 객체들을 처리
+                            json_str = '[' + content + ']'
+                            try:
+                                existing_result_logs = json.loads(json_str)
+                            except json.JSONDecodeError:
+                                # 콤마 없이 개별 JSON 객체들을 분리하여 처리
+                                for line in content.split('\n\n'):
+                                    if line.strip():
+                                        try:
+                                            obj = json.loads(line.strip())
+                                            existing_result_logs.append(obj)
+                                        except json.JSONDecodeError:
+                                            print(f"JSON 파싱 오류 발생: {line[:100]}...")
+                    except json.JSONDecodeError as e:
+                        print(f"결과 로그 파일 파싱 오류: {str(e)}")
+        
+        # 새 로그를 맨 앞에 추가
+        existing_result_logs.insert(0, result_log_data)
+        
+        # 파일에 저장 - JSON 배열 형식으로 저장
+        with open(result_log_file, 'w', encoding='utf-8') as f:
+            f.write('[\n')
+            for i, log_entry in enumerate(existing_result_logs):
+                # 각 로그 항목을 들여쓰기된 JSON으로 변환
+                formatted_json = json.dumps(log_entry, ensure_ascii=False, indent=2)
+                f.write(formatted_json)
+                
+                # 마지막 항목이 아니면 콤마 추가
+                if i < len(existing_result_logs) - 1:
+                    f.write(',\n')
+                else:
+                    f.write('\n')
+            f.write(']\n')
+        
+        print(f"결과 로그가 {result_log_file}에 저장되었습니다.")
+        
+    except Exception as e:
+        print(f"결과 로그 저장 중 오류 발생: {str(e)}")

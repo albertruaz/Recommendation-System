@@ -2,8 +2,8 @@
   "model_type": "pyspark_als",
   "pyspark_als": {
     "max_iter": 15,
-    "reg_param": 0.001,
-    "rank": 40,
+    "reg_param": 0.1,
+    "rank": 10,
     "interaction_weights": {
       "impression1": 1.0,
       "impression2": 0.5,
@@ -16,7 +16,7 @@
     }
   },
   "default_params": {
-    "days": 1,
+    "days": 30,
     "top_n": 100,
     "output_dir": "output",
     "verbose": false

@@ -15,11 +15,14 @@ from utils.recommendation_utils import save_recommendations
 
 from sklearn.model_selection import train_test_split
 
-class RunALS:
-    def __init__(self):
+class RunALSTuning:
+    def __init__(self, max_iter, reg_param, rank):
         # 설정 파일 로드
         with open('config/als_config.json', 'r') as f:
             self.als_config = json.load(f)
+        self.als_config['pyspark_als']['max_iter'] = max_iter
+        self.als_config['pyspark_als']['reg_param'] = reg_param
+        self.als_config['pyspark_als']['rank'] = rank
         
         # 로거 설정
         self.logger = setup_logger('run_als')
@@ -34,13 +37,6 @@ class RunALS:
         self.test_ratio = self.als_config['testing'].get('test_ratio', 0.2)
         self.random_seed = self.als_config['testing'].get('random_seed', 42)
         self.enable_loss_calculation = self.als_config['testing'].get('calculate_loss', True)
-        
-        # 모델 매개변수 로드
-        model_params = self.als_config['pyspark_als']
-        self.max_iter = model_params['max_iter']
-        self.reg_param = model_params['reg_param']
-        self.rank = model_params['rank']
-        self.interaction_weights = model_params['interaction_weights']
         
         self.model = None
         self.test_data = None
@@ -91,8 +87,9 @@ class RunALS:
             
             # 손실 계산
             if 'rating' not in valid_predictions.columns and 'interaction_type' in valid_predictions.columns:
-                # 인스턴스 변수에서 interaction_weights 직접 사용
-                valid_predictions['rating'] = valid_predictions['interaction_type'].map(self.interaction_weights)
+                valid_predictions['rating'] = valid_predictions['interaction_type'].map(
+                    self.als_config['pyspark_als']['interaction_weights']
+                )
             
             actual = valid_predictions['rating'].values
             pred = valid_predictions['prediction'].values
@@ -138,12 +135,12 @@ class RunALS:
             # 데이터 분할 (필요한 경우)
             train_df, self.test_data = self.split_data(interactions_df)
             
-            # 모델 초기화 (init에서 로드한 매개변수 사용)
+            # 모델 초기화
             self.model = PySparkALS(
-                max_iter=self.max_iter,
-                reg_param=self.reg_param,
-                rank=self.rank,
-                interaction_weights=self.interaction_weights,
+                max_iter=self.als_config['pyspark_als']['max_iter'],
+                reg_param=self.als_config['pyspark_als']['reg_param'],
+                rank=self.als_config['pyspark_als']['rank'],
+                interaction_weights=self.als_config['pyspark_als']['interaction_weights'],
                 max_prediction=50.0,
                 huber_delta=10.0,
                 split_test_data=self.split_test_data
@@ -191,7 +188,7 @@ class RunALS:
                 self.logger.info(f"- 샘플 수: {test_result['samples']}")
             save_recommendations(recommendations_df, output_dir=output_dir_with_id)
             # 전체 실행 로그 저장 - run_id 전달
-            overall_log(run_id, train_result, test_result, self.als_config)
+            overall_log(run_id, train_result, test_result)
             
             return result
             

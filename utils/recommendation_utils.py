@@ -29,8 +29,16 @@ def save_recommendations(recommendations_df, output_dir='output', file_name=None
     
     # 파일명 설정
     if file_name is None:
-        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        file_name = f'recommendations_{timestamp}.csv'
+        # output_dir이 run_id를 포함하는지 확인
+        dir_parts = output_dir.split('/')
+        if len(dir_parts) > 0 and '_' in dir_parts[-1]:
+            # 마지막 디렉토리가 run_id 형식인 경우
+            run_id = dir_parts[-1]
+            file_name = f'recommendations_{run_id}.csv'
+        else:
+            # 기존 방식으로 타임스탬프 사용
+            timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+            file_name = f'recommendations_{timestamp}.csv'
     
     # 파일 경로 생성
     output_path = os.path.join(output_dir, file_name)
