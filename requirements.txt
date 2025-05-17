@@ -20,6 +20,7 @@ sqlalchemy==2.0.40
 pymysql==1.1.1
 tqdm==4.67.1
 colorlog==6.9.0
+matplotlib==3.7.3  # 시각화 도구
 
 
 # 데이터베이스

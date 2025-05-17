@@ -59,6 +59,7 @@ logs/
 data/raw/
 data/processed/
 models/saved/
+tuning_output/
 
 # macOS
 .DS_Store

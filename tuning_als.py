@@ -1,5 +1,5 @@
 """
-ALS 기반 추천 시스템 하이퍼파라미터 튜닝 스크립트
+PySpark ALS 기반 추천 시스템 하이퍼파라미터 튜닝 스크립트
 """
 
 import os
@@ -9,77 +9,28 @@ import numpy as np
 import itertools
 import time
 import gc
+import matplotlib.pyplot as plt
+import seaborn as sns
 from datetime import datetime
-import wandb
-from dotenv import load_dotenv
-from database.recommendation_db import RecommendationDB
+from pyspark.sql import SparkSession
+from pyspark.ml.evaluation import RegressionEvaluator
 from database.excel_db import ExcelRecommendationDB
 
 from utils.logger import setup_logger
+from utils.spark_utils import SparkSingleton, safe_format, calculate_huber_loss, evaluate_model, apply_prediction_cap, calculate_validation_weighted_sum_spark
 
-# 환경 변수 로드
-load_dotenv()
-
-# 튜닝 설정 파일 로드
+# 설정 파일 로드
 with open('config/tuning_config.json', 'r') as f:
     TUNING_CONFIG = json.load(f)
 
 # 로거 설정
 logger = setup_logger('tuning')
 
-# PySpark 설정을 위한 환경 변수 설정
-def configure_spark_env():
-    """Spark 실행을 위한 환경 변수 설정"""
-    # 메모리 설정
-    os.environ['PYSPARK_SUBMIT_ARGS'] = '--driver-memory 4g --executor-memory 4g pyspark-shell'
-    os.environ['SPARK_LOCAL_DIRS'] = '/tmp'
-    
-    # GC 로그 출력 완전 비활성화 (콘솔 출력만 제거)
-    os.environ['SPARK_JAVA_OPTS'] = '-XX:+UseG1GC -XX:+UseCompressedOops -XX:-PrintGCDetails -XX:-PrintGCTimeStamps'
-    
-    # 로깅 레벨 설정 (콘솔 출력에 대해서만 ERROR로 설정)
-    os.environ['SPARK_LOG_LEVEL'] = 'ERROR'
-    
-    # log4j.properties 파일 경로 설정
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    log4j_path = os.path.join(current_dir, "log4j.properties")
-    
-    # 해당 경로에 파일이 실제로 존재하는지 확인
-    if os.path.exists(log4j_path):
-        # log4j 설정 파일 경로 설정
-        system_properties = [
-            f"-Dlog4j.configuration=file:{log4j_path}",
-            "-Dlog4j.debug=false"  # log4j 디버그 모드 비활성화
-        ]
-        
-        if 'SPARK_JAVA_OPTS' in os.environ:
-            os.environ['SPARK_JAVA_OPTS'] += ' ' + ' '.join(system_properties)
-        else:
-            os.environ['SPARK_JAVA_OPTS'] = ' '.join(system_properties)
-    
-    # SparkUI 비활성화 - 콘솔 출력 제거를 위한 설정
-    spark_conf = [
-        "--conf spark.ui.enabled=false",
-        "--conf spark.ui.showConsoleProgress=false"
-    ]
-    
-    if 'PYSPARK_SUBMIT_ARGS' in os.environ:
-        submit_args = os.environ['PYSPARK_SUBMIT_ARGS']
-        # pyspark-shell 앞에 설정 추가
-        if "pyspark-shell" in submit_args:
-            parts = submit_args.split("pyspark-shell")
-            os.environ['PYSPARK_SUBMIT_ARGS'] = f"{parts[0]} {' '.join(spark_conf)} pyspark-shell{parts[1] if len(parts) > 1 else ''}"
-        else:
-            os.environ['PYSPARK_SUBMIT_ARGS'] += ' ' + ' '.join(spark_conf)
-
-def load_interactions(days: int = 30, use_test_db: bool = False) -> pd.DataFrame:
+def load_interactions(days: int = 30, use_test_db: bool = True) -> pd.DataFrame:
     """데이터베이스에서 상호작용 데이터 로드"""
     logger.info(f"days: {days}")
     
-    if use_test_db:
-        db = ExcelRecommendationDB()
-    else:
-        db = RecommendationDB()
+    db = ExcelRecommendationDB()
         
     interactions = db.get_user_item_interactions(days=days)
     
@@ -90,553 +41,578 @@ def load_interactions(days: int = 30, use_test_db: bool = False) -> pd.DataFrame
     logger.info(f"총 {len(interactions)}개의 상호작용 데이터 로드 완료")
     return interactions
 
-def run_model(model_type, params, interactions_df, top_n, run=None):
-    """모델 학습 및 평가 실행"""
-    try:
-        logger.info(f"모델 파라미터: {params}")
+def load_data(days: int, use_test_db: bool = True, interaction_weights: dict = None):
+    """
+    데이터 로드 및 전처리
+    
+    Args:
+        days: 데이터 로드 기간
+        use_test_db: 테스트 DB 사용 여부
+        interaction_weights: 상호작용 타입별 가중치
         
-        # 모델 초기화
-        if model_type == 'custom_implicit_als':
-            from models.custom_implicit_als import CustomImplicitALS
-            model = CustomImplicitALS(
-                max_iter=params['max_iter'],
-                reg_param=params['reg_param'],
-                rank=params['rank'],
-                random_state=42,
-                interaction_weights=params['interaction_weights']
-            )
-        elif model_type == 'implicit_als':
-            from models.implicit_als import ImplicitALS
-            model = ImplicitALS(
-                max_iter=params['max_iter'],
-                reg_param=params['reg_param'],
-                rank=params['rank'],
-                random_state=42,
-                alpha=params.get('alpha', 40),
-                interaction_weights=params['interaction_weights']
-            )
-        elif model_type == 'pyspark_als':
-            # PySpark ALS 모델을 사용하기 전에 Spark 설정
-            configure_spark_env()
-            
-            # import SparkSession을 함수 내부에서 수행
-            from pyspark.sql import SparkSession
-            # 기존 Spark 세션이 있으면 종료
-            spark = SparkSession._instantiatedSession
-            if spark is not None:
-                spark.stop()
-                # 명시적으로 GC 실행
-                gc.collect()
-                time.sleep(2)  # 리소스가 해제될 시간을 줌
-            
-            # PySpark ALS 모델 임포트
-            from models.pyspark_als import PySparkALS
-            model = PySparkALS(
-                max_iter=params['max_iter'],
-                reg_param=params['reg_param'],
-                rank=params['rank'],
-                random_state=42,
-                alpha=params.get('alpha', 1.0),
-                interaction_weights=params['interaction_weights'],
-                max_prediction=50.0,  # 예측값 상한 설정
-                huber_delta=10.0      # Huber Loss의 델타값 설정
-            )
-        else:  # buffalo_als
-            from models.buffalo_als import BuffaloALS
-            model = BuffaloALS(
-                max_iter=params['max_iter'],
-                reg_param=params['reg_param'],
-                rank=params['rank'],
-                random_state=42,
-                alpha=params.get('alpha', 40),
-                interaction_weights=params['interaction_weights']
-            )
-        
-        # 행렬 데이터 준비
-        start_time = time.time()
-        matrix_data = model.prepare_matrices(interactions_df)
-        prep_time = time.time() - start_time
-        logger.info(f"행렬 변환 완료 (소요 시간: {prep_time:.2f}초)")
-        
-        # 모델 학습
-        start_time = time.time()
-        model.train(interactions_df=interactions_df, matrix_data=matrix_data)
-        train_time = time.time() - start_time
-        logger.info(f"모델 학습 완료 (소요 시간: {train_time:.2f}초)")
-        
-        # 결과 저장
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join(
-            TUNING_CONFIG['default_params']['output_dir'],
-            f"{model_type}_iter{params['max_iter']}_reg{params['reg_param']}_rank{params['rank']}"
-        )
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # 성능 지표 수집
-        metrics = {
-            'prep_time': prep_time,
-            'train_time': train_time,
-            'total_time': prep_time + train_time,
-            'output_dir': output_dir
-        }
-        
-        # 모델 구현별로 다른 성능 지표 수집
-        if hasattr(model, 'metrics'):
-            metrics.update(model.metrics)
-        
-        return metrics
-        
-    except Exception as e:
-        logger.error(f"모델 실행 오류: {str(e)}")
-        raise
-    finally:
-        # 리소스 정리
-        if 'model' in locals():
-            try:
-                model.cleanup()
-            except Exception as cleanup_err:
-                logger.warning(f"모델 리소스 정리 중 오류: {str(cleanup_err)}")
-                
-            # 모델 객체 명시적으로 제거
-            del model
-        
-        # 명시적 GC 호출
-        gc.collect()
-        time.sleep(1)  # 메모리 해제될 시간 제공
+    Returns:
+        전처리된 상호작용 데이터프레임
+    """
+    logger.info("데이터 로드 및 전처리 중...")
+    
+    # 데이터 로드
+    interactions_df = load_interactions(days=days, use_test_db=use_test_db)
+    
+    # 상호작용 타입별 통계 출력
+    interaction_stats = interactions_df['interaction_type'].value_counts()
+    logger.info(f"\n상호작용 타입별 통계:")
+    for itype, count in interaction_stats.items():
+        logger.info(f"- {itype}: {count}건")
+    logger.info(f"총 {len(interactions_df)}개의 상호작용 데이터 로드 완료")
+    
+    # rating 필드 추가
+    if interaction_weights:
+        interactions_df['rating'] = interactions_df['interaction_type'].map(interaction_weights)
+        # 0 값은 제외
+        interactions_df = interactions_df[interactions_df['rating'] > 0]
+    
+    return interactions_df
 
-def run_model_optimized(model_type, params, interactions_df, matrix_data):
-    """행렬 변환 결과를 재사용하여 최적화된 모델 학습 및 평가 실행"""
-    try:
-        logger.info(f"모델 파라미터: {params}")
+def prepare_spark(app_name: str):
+    """
+    Spark 세션 준비
+    
+    Args:
+        app_name: Spark 애플리케이션 이름
         
-        # 모델 초기화
-        if model_type == 'pyspark_als':
-            # PySpark ALS 모델을 사용하기 전에 Spark 설정
-            configure_spark_env()
-            
-            # import SparkSession을 함수 내부에서 수행
-            from pyspark.sql import SparkSession
-            # 기존 Spark 세션이 있으면 종료
-            spark = SparkSession._instantiatedSession
-            if spark is not None:
-                spark.stop()
-                # 명시적으로 GC 실행
-                gc.collect()
-                time.sleep(2)  # 리소스가 해제될 시간을 줌
-            
-            # PySpark ALS 모델 임포트
-            from models.pyspark_als import PySparkALS
-            model = PySparkALS(
-                max_iter=params['max_iter'],
-                reg_param=params['reg_param'],
-                rank=params['rank'],
-                random_state=42,
-                alpha=params.get('alpha', 1.0),
-                interaction_weights=params['interaction_weights'],
-                max_prediction=50.0,  # 예측값 상한 설정
-                huber_delta=10.0      # Huber Loss의 델타값 설정
-            )
-        else:
-            logger.error("이 함수는 pyspark_als 모델 유형에만 사용할 수 있습니다.")
-            raise ValueError("Invalid model_type for optimized run")
-        
-        # 행렬 데이터가 이미 준비되어 있으므로 prepare_matrices 단계 생략
-        # 대신 ALS 클래스의 인덱스 매핑 정보 설정 (prepare_matrices에서 수행하는 일부 작업)
-        model._prepare_indices_from_matrix_data(matrix_data)
-        
-        # 모델 학습 (이미 준비된 행렬 데이터 사용)
-        start_time = time.time()
-        model.train(interactions_df=interactions_df, matrix_data=matrix_data)
-        train_time = time.time() - start_time
-        logger.info(f"모델 학습 완료 (소요 시간: {train_time:.2f}초)")
-        
-        # 결과 저장
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join(
-            TUNING_CONFIG['default_params']['output_dir'],
-            f"{model_type}_iter{params['max_iter']}_reg{params['reg_param']}_rank{params['rank']}"
-        )
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # 성능 지표 수집
-        metrics = {
-            'train_time': train_time,
-            'total_time': train_time,  # 행렬 변환 시간 제외됨
-            'output_dir': output_dir
-        }
-        
-        # 모델 구현별로 다른 성능 지표 수집
-        if hasattr(model, 'metrics'):
-            metrics.update(model.metrics)
-        
-        return metrics
-        
-    except Exception as e:
-        logger.error(f"모델 실행 오류: {str(e)}")
-        raise
-    finally:
-        # 리소스 정리
-        if 'model' in locals():
-            try:
-                model.cleanup()
-            except Exception as cleanup_err:
-                logger.warning(f"모델 리소스 정리 중 오류: {str(cleanup_err)}")
-                
-            # 모델 객체 명시적으로 제거
-            del model
-        
-        # 명시적 GC 호출
-        gc.collect()
-        time.sleep(1)  # 메모리 해제될 시간 제공
+    Returns:
+        생성된 SparkSession
+    """
+    logger.info("Spark 세션 준비 중...")
+    
+    # SparkSession 생성
+    spark_session = SparkSingleton.get(app_name=app_name, log_level="ERROR")
+    logger.info("SparkSession 생성 완료")
+    
+    return spark_session
 
-def main():
-    # 설정 로드
-    logger.info("하이퍼파라미터 튜닝 시작")
-    days = TUNING_CONFIG['default_params']['days']
-    top_n = TUNING_CONFIG['default_params']['top_n']
+def prepare_matrices(interactions_df, spark_session, model_config):
+    """
+    행렬 데이터 준비
+    
+    Args:
+        interactions_df: 상호작용 데이터프레임
+        spark_session: Spark 세션
+        model_config: 모델 설정
+        
+    Returns:
+        tuple: (init_model, matrix_data)
+    """
+    logger.info("행렬 데이터 준비 중...")
+    
+    from models.pyspark_als import PySparkALS
+    
+    # 샘플 크기 제한 가져오기 - 모델 파라미터에서 분리
+    max_sample_size = model_config.get('max_sample_size', 300000)
+    
+    # 모델 파라미터만 추출 (max_sample_size 및 기타 설정 제외)
+    model_params = {}
+    for key, value in model_config.items():
+        if key not in ['max_sample_size', 'checkpoint_dir'] and not isinstance(value, list):
+            model_params[key] = value
+    
+    # 모델 생성 (초기화만)
+    init_model = PySparkALS(**model_params)
+    init_model.spark = spark_session  # 세션 직접 지정
+    
+    # 전체 데이터로 행렬 변환
+    matrix_data = init_model.prepare_matrices(
+        interactions_df,
+        max_sample_size=max_sample_size,
+        split_strategy='random'  # 항상 랜덤 분할 사용
+    )
+    logger.info("행렬 변환 완료")
+    
+    return init_model, matrix_data
+
+def run_pyspark_als(params, interactions_df, matrix_data, spark_session=None):
+    """
+    PySpark ALS 모델을 실행하고 결과를 반환
+    
+    Args:
+        params: 하이퍼파라미터 딕셔너리
+        interactions_df: 전체 상호작용 데이터프레임
+        matrix_data: (ratings_df, train_data, test_data) 튜플
+        spark_session: 재사용할 SparkSession (없으면 새로 생성)
+        
+    Returns:
+        dict: 평가 지표와 하이퍼파라미터를 담은 딕셔너리
+    """
+    from models.pyspark_als import PySparkALS
+    
+    # 결과 저장 딕셔너리에 하이퍼파라미터 추가
+    result = params.copy()
+    
+    # 기본값으로 NaN 설정 - 실패 시 시각화에서 필터링 가능하도록
+    result['test_rmse'] = np.nan
+    result['test_huber_loss'] = np.nan
+    result['validation_weighted_sum'] = np.nan
     
     try:
-        # Wandb 초기화 - API 키는 환경 변수에서 가져옴
-        wandb_api_key = os.getenv('WANDB_API_KEY')
-        if not wandb_api_key:
-            logger.warning("WANDB_API_KEY 환경 변수가 설정되지 않았습니다. wandb 로그인이 필요할 수 있습니다.")
-            wandb.login(relogin=False)  # 필요한 경우에만 로그인 프롬프트 표시
-        else:
-            # API 키가 있으면 자동 로그인
-            wandb.login(key=wandb_api_key, relogin=True)
-            logger.info("wandb에 자동 로그인되었습니다.")
+        # 모델 생성
+        model = PySparkALS(**params)
         
-        # 데이터 로드
-        interactions_df = load_interactions(days=days, use_test_db=True)
+        # 기존 SparkSession 사용 설정
+        if spark_session is not None:
+            model.spark = spark_session
         
-        # 모델 타입 확인
-        model_type = TUNING_CONFIG['model_type']
-        logger.info(f"튜닝할 모델: {model_type}")
+        # 시작 시간 기록
+        start_time = time.time()
         
-        # 모델 설정 가져오기
-        model_config = TUNING_CONFIG[model_type]
+        # 모델 학습
+        model.train(interactions_df, matrix_data)
         
-        # 하이퍼파라미터 조합 생성
-        param_keys = []
-        param_values = []
+        # 학습 시간 기록
+        train_time = time.time() - start_time
+        result['train_time'] = train_time
         
-        for key, value in model_config.items():
-            if isinstance(value, list):
-                param_keys.append(key)
-                param_values.append(value)
+        # 테스트 데이터로 평가
+        ratings_df, train_data, test_data = matrix_data
         
-        # 튜닝 결과를 저장할 리스트
-        tuning_results = []
+        # 테스트 데이터 검사
+        test_count = test_data.count()
+        logger.info(f"테스트 데이터 크기: {test_count}개 row")
         
-        # Wandb 프로젝트 초기화 - 새 이름 사용
-        wandb_project = f"als-optimize-{model_type}-v2"
+        if test_count == 0:
+            logger.warning("테스트 데이터가 비어있습니다. 모든 메트릭을 NaN으로 설정합니다.")
+            return result
         
-        # 모든 하이퍼파라미터 조합에 대해 모델 실행 (wandb 외부에서)
-        all_params_list = []
-        for params_tuple in itertools.product(*param_values):
-            # 파라미터 딕셔너리 생성
-            params = {
-                param_keys[i]: params_tuple[i] 
-                for i in range(len(param_keys))
-            }
+        # 테스트 데이터에 대한 예측 생성
+        try:
+            predictions = model.transform(test_data)
+            pred_count = predictions.count()
+            logger.info(f"예측 결과 크기: {pred_count}개 row")
             
-            # 고정 파라미터 추가
-            for key, value in model_config.items():
-                if key not in params:
-                    params[key] = value
-                    
-            all_params_list.append(params)
-        
-        # PySpark ALS 모델인 경우 메모리 문제 방지를 위해 하이퍼파라미터 규모 조정
-        if model_type == 'pyspark_als':
-            # 1. 배치 크기 설정 - 한 번에 처리할 최대 하이퍼파라미터 조합 수 제한
-            batch_size = 3
+            if pred_count == 0:
+                logger.warning("예측 결과가 비어있습니다. coldStartStrategy 문제일 수 있습니다.")
+                return result
             
-            # 2. 메모리 소비가 적은 조합부터 실행하도록 정렬
-            # 메모리 소비를 추정하는 함수 (rank가 클수록, max_iter가 클수록 메모리 소비 증가)
-            def estimate_memory_usage(params):
-                return params['rank'] * params['max_iter']
+            # NaN 값을 가진 행 제거 (coldStartStrategy='nan' 때문에 발생)
+            predictions = predictions.dropna(subset=['prediction'])
+            filtered_pred_count = predictions.count()
             
-            all_params_list.sort(key=estimate_memory_usage)
+            if filtered_pred_count == 0:
+                logger.warning("NaN 예측을 제거한 후 예측 결과가 비어있습니다.")
+                return result
             
-            # 3. 행렬 변환 사전 계산 (공통 행렬 생성)
-            # 단, interaction_weights가 모든 파라미터 세트에서 동일한 경우에만 가능
-            if all(params['interaction_weights'] == all_params_list[0]['interaction_weights'] 
-                   for params in all_params_list):
-                logger.info("모든 파라미터 조합이 동일한 interaction_weights를 사용하므로 행렬 변환을 한 번만 수행합니다.")
-                
-                # 첫 번째 파라미터 세트로 모델 초기화 (matrix_data 생성용)
-                from models.pyspark_als import PySparkALS
-                matrix_model = PySparkALS(
-                    max_iter=10,  # 임시 값, 행렬 변환에만 사용됨
-                    reg_param=0.1, # 임시 값
-                    rank=10,  # 임시 값
-                    random_state=42,
-                    interaction_weights=all_params_list[0]['interaction_weights']
-                )
-                
-                # PySpark 설정
-                configure_spark_env()
-                
-                # 행렬 변환 수행
-                logger.info("공통 행렬 변환 시작...")
-                start_time = time.time()
-                common_matrix_data = matrix_model.prepare_matrices(interactions_df)
-                prep_time = time.time() - start_time
-                logger.info(f"공통 행렬 변환 완료 (소요 시간: {prep_time:.2f}초)")
-                
-                # 메모리 관리를 위해 모델 객체 제거
-                matrix_model.cleanup()
-                del matrix_model
-                gc.collect()
-                time.sleep(2)
-                
-                # 3. 배치 단위로 실행 (행렬 변환 재사용)
-                for i in range(0, len(all_params_list), batch_size):
-                    batch_params = all_params_list[i:i+batch_size]
-                    for j, params in enumerate(batch_params):
-                        logger.info(f"\n=== 하이퍼파라미터 튜닝 진행 상황 ===")
-                        logger.info(f"전체 진행: [{i+j+1}/{len(all_params_list)}] ({((i+j+1)/len(all_params_list))*100:.1f}%)")
-                        logger.info(f"현재 파라미터: max_iter={params['max_iter']}, reg_param={params['reg_param']}, rank={params['rank']}")
-                        try:
-                            # 최적화된 모델 실행 함수 호출 (matrix_data 재사용)
-                            result = run_model_optimized(model_type, params, interactions_df, common_matrix_data)
-                            result.update(params)
-                            tuning_results.append(result)
-                        except Exception as e:
-                            logger.error(f"조합 {params} 실행 실패: {str(e)}")
-                            # 실패한 경우에도 일부 정보 저장
-                            result = {
-                                'max_iter': params['max_iter'],
-                                'reg_param': params['reg_param'],
-                                'rank': params['rank'],
-                                'error': str(e)
-                            }
-                            tuning_results.append(result)
-                        
-                        # 메모리 정리를 위한 시간 제공
-                        gc.collect()
-                        time.sleep(3)
-            else:
-                logger.info("interaction_weights가 파라미터 조합마다 다르므로 각각 행렬 변환을 수행합니다.")
-                # 기존 방식대로 실행 (각 조합별로 행렬 변환 포함)
-                for i in range(0, len(all_params_list), batch_size):
-                    batch_params = all_params_list[i:i+batch_size]
-                    for j, params in enumerate(batch_params):
-                        logger.info(f"\n=== 하이퍼파라미터 튜닝 진행 상황 ===")
-                        logger.info(f"전체 진행: [{i+j+1}/{len(all_params_list)}] ({((i+j+1)/len(all_params_list))*100:.1f}%)")
-                        logger.info(f"현재 파라미터: max_iter={params['max_iter']}, reg_param={params['reg_param']}, rank={params['rank']}")
-                        try:
-                            result = run_model(model_type, params, interactions_df, top_n)
-                            result.update(params)
-                            tuning_results.append(result)
-                        except Exception as e:
-                            logger.error(f"조합 {params} 실행 실패: {str(e)}")
-                            # 실패한 경우에도 일부 정보 저장
-                            result = {
-                                'max_iter': params['max_iter'],
-                                'reg_param': params['reg_param'],
-                                'rank': params['rank'],
-                                'error': str(e)
-                            }
-                            tuning_results.append(result)
-                        
-                        # 메모리 정리를 위한 시간 제공
-                        gc.collect()
-                        time.sleep(3)
-        else:
-            # 다른 모델은 일반적인 방식으로 실행
-            for i, params in enumerate(all_params_list):
-                logger.info(f"파라미터 조합 실행 [{i+1}/{len(all_params_list)}]: {params}")
-                result = run_model(model_type, params, interactions_df, top_n)
-                result.update(params)
-                tuning_results.append(result)
-        
-        # 결과를 DataFrame으로 변환
-        results_df = pd.DataFrame(tuning_results)
-        
-        # 성능 지표 기준으로 결과 정렬
-        if 'test_huber_loss' in results_df.columns:
-            results_df = results_df.sort_values('test_huber_loss')
-        elif 'test_rmse' in results_df.columns:
-            results_df = results_df.sort_values('test_rmse')
-        
-        # 결과 파일 저장
-        results_path = os.path.join(
-            TUNING_CONFIG['default_params']['output_dir'],
-            f"tuning_results_{model_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        )
-        results_df.to_csv(results_path, index=False)
-        logger.info(f"튜닝 결과가 {results_path}에 저장되었습니다.")
-        
-        # Wandb에 한 번에 결과 시각화 (단일 run으로)
-        with wandb.init(project=wandb_project, entity="vingle", name=f"{model_type}-hyper-search", job_type="sweep") as run:
-            # 설정한 모든 하이퍼파라미터 값을 config에 등록
-            param_space = {key: model_config[key] for key in param_keys}
-            run.config.update({
-                "param_space": param_space,
-                "num_trials": len(tuning_results),
-                "model_type": model_type,
-                "days": days,
-                "top_n": top_n
-            })
+            logger.info(f"NaN 예측 제거 후 결과 크기: {filtered_pred_count}개 row")
             
-            # WandB Artifacts로 결과 CSV 저장
-            results_artifact = wandb.Artifact(f"{model_type}-tuning-results", type="dataset")
-            results_artifact.add_file(results_path)
-            run.log_artifact(results_artifact)
+            # 테스트 손실 계산
+            evaluator_rmse = RegressionEvaluator(
+                metricName="rmse", 
+                labelCol="rating",
+                predictionCol="prediction"
+            )
             
-            # 결과 테이블 생성 및 로깅
-            table_columns = ["trial_id", "max_iter", "reg_param", "rank"]
-            
-            # 모델 성능 지표 열 추가
-            if 'train_rmse' in results_df.columns:
-                table_columns.extend(["train_rmse", "test_rmse"])
-            if 'train_huber_loss' in results_df.columns:
-                table_columns.extend(["train_huber_loss", "test_huber_loss"])
-                
-            table_columns.extend(["train_time", "total_time"])
-            
-            # Table 데이터 생성
-            table_data = []
-            for idx, row in results_df.iterrows():
-                table_row = [idx]
-                for col in table_columns[1:]:
-                    if col in row:
-                        table_row.append(row[col])
-                    else:
-                        table_row.append(None)
-                table_data.append(table_row)
-            
-            results_table = wandb.Table(columns=table_columns, data=table_data)
-            run.log({"hyperparameter_tuning_results": results_table})
-            
-            # Parallel Coordinates Plot
-            # 주요 하이퍼파라미터와 성능 지표만 선택
-            pc_columns = ["max_iter", "reg_param", "rank"]
-            if 'test_rmse' in results_df.columns:
-                pc_columns.append("test_rmse")
-            if 'test_huber_loss' in results_df.columns:
-                pc_columns.append("test_huber_loss")
-            pc_columns.append("train_time")
-            
-            # 결과에서 필요한 열만 추출
-            pc_data = []
-            for _, row in results_df.iterrows():
-                row_data = []
-                for col in pc_columns:
-                    if col in row:
-                        row_data.append(row[col])
-                    else:
-                        row_data.append(None)
-                pc_data.append(row_data)
-            
-            # Parallel Coordinates 차트 생성
             try:
-                parallel_coords = wandb.plot.parallel_coordinates(
-                    table_data=pc_data,
-                    columns=pc_columns,
-                    title="Hyperparameter Tuning Comparison"
-                )
-                run.log({"parallel_coordinates": parallel_coords})
+                test_rmse = evaluator_rmse.evaluate(predictions)
+                result['test_rmse'] = test_rmse
             except Exception as e:
-                logger.warning(f"Parallel coordinates 플롯 생성 실패: {str(e)}")
-                logger.info("대체 시각화를 위해 데이터를 CSV로 저장합니다.")
+                logger.warning(f"RMSE 계산 중 오류: {str(e)}")
             
-            # 튜닝 결과를 CSV로 명시적으로 저장 (wandb가 실패해도 로컬에 백업)
-            # 현재 시간을 파일명에 포함하여 기존 파일을 덮어쓰지 않음
-            local_backup_path = os.path.join(
-                TUNING_CONFIG['default_params']['output_dir'],
-                f"tuning_results_backup_{model_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            )
-            results_df.to_csv(local_backup_path, index=False)
-            logger.info(f"튜닝 결과 백업이 {local_backup_path}에 저장되었습니다.")
-            
-            # 하이퍼파라미터별 성능 비교 차트
-            # 1. RMSE/Huber Loss를 기준으로 한 하이퍼파라미터 영향도 분석
-            for param in ["max_iter", "reg_param", "rank"]:
-                if param not in results_df.columns:
-                    continue
-                    
-                param_values = sorted(results_df[param].unique())
+            # Huber Loss 계산 (지원되는 경우)
+            try:
+                test_huber_loss = calculate_huber_loss(predictions)
+                result['test_huber_loss'] = test_huber_loss
+            except Exception as e:
+                logger.warning(f"Huber Loss 계산 중 오류: {str(e)}")
                 
-                # 각 파라미터 값에 대한 성능 지표 평균 계산
-                for metric in ["test_rmse", "test_huber_loss", "train_time"]:
-                    if metric not in results_df.columns:
-                        continue
-                        
-                    metric_by_param = []
-                    for val in param_values:
-                        subset = results_df[results_df[param] == val]
-                        avg_metric = subset[metric].mean()
-                        metric_by_param.append([str(val), avg_metric])
-                    
-                    # 차트 생성 및 로깅
-                    param_table = wandb.Table(columns=[param, metric], data=metric_by_param)
-                    run.log({f"{param}_vs_{metric}": wandb.plot.bar(param_table, param, metric,
-                                                                    title=f"Impact of {param} on {metric}")})
+            # 검증 가중 합계 계산 - Spark 기반 메서드 직접 호출
+            try:
+                logger.info("Spark 기반 Top-N 추천 검증 시작")
+                validation_weighted_sum = calculate_validation_weighted_sum_spark(
+                    model=model.model,
+                    test_data_spark=test_data, 
+                    top_n=20,
+                    logger=logger
+                )
+                result['validation_weighted_sum'] = validation_weighted_sum
+            except Exception as e:
+                logger.warning(f"Spark 기반 검증 실패: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"예측 생성 또는 평가 중 오류: {str(e)}")
+        
+        # 메모리 해제 시간을 주기
+        time.sleep(2)
+        
+        # 모델 정리 (SparkSession 유지)
+        if spark_session is not None:
+            # 외부에서 제공된 SparkSession은 종료하지 않고, 모델 객체만 정리
+            model.model = None  # 모델 객체 참조 제거
+            # 명시적으로 외부 세션임을 표시
+            model._session_created_internally = False
+        else:
+            # 내부에서 생성한 SparkSession은 함께 정리
+            model._session_created_internally = True
+            model.cleanup()
+        
+        del model
+        gc.collect()
+        
+    except Exception as e:
+        logger.error(f"모델 실행 중 오류: {str(e)}")
+        result['error'] = str(e)
+        
+    return result
+
+def run_tuning(params_list, interactions_df, matrix_data, spark_session):
+    """
+    하이퍼파라미터 튜닝 루프 실행
+    
+    Args:
+        params_list: 모델 파라미터 리스트
+        interactions_df: 상호작용 데이터프레임
+        matrix_data: 행렬 데이터
+        spark_session: Spark 세션
+        
+    Returns:
+        dict: 튜닝 결과 리스트
+    """
+    logger.info(f"하이퍼파라미터 튜닝 루프 시작 (총 {len(params_list)}개 조합)")
+    
+    # 튜닝 결과를 저장할 리스트
+    tuning_results = []
+    
+    # 타임스탬프 생성
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # 모든 하이퍼파라미터 조합에 대해 모델 실행
+    for i, params in enumerate(params_list):
+        logger.info(f"\n=== 하이퍼파라미터 튜닝 진행 상황 ===")
+        logger.info(f"진행: [{i+1}/{len(params_list)}] ({((i+1)/len(params_list))*100:.1f}%)")
+        logger.info(f"현재 파라미터: max_iter={params.get('max_iter', 'N/A')}, reg_param={params.get('reg_param', 'N/A')}, rank={params.get('rank', 'N/A')}")
+        
+        # SparkSession 상태 확인
+        if spark_session is not None:
+            try:
+                # 세션이 살아있는지 간단히 확인
+                is_active = SparkSingleton.is_active(spark_session)
+                if not is_active:
+                    logger.warning("SparkSession이 활성 상태가 아닙니다. 새 세션을 생성합니다.")
+                    spark_session = None
+                    gc.collect()  # 메모리 정리
+            except Exception as e:
+                logger.warning(f"SparkSession 상태 확인 중 오류: {str(e)}. 새 세션을 생성합니다.")
+                spark_session = None
+                gc.collect()
+        
+        # 필요한 경우 새 SparkSession 생성
+        if spark_session is None:
+            try:
+                logger.info("새 SparkSession 생성 중...")
+                
+                # 새 세션 생성
+                spark_session = SparkSingleton.get(f"PySparkALS_Tuning_{timestamp}_{i}")
+                
+                # 파라미터에서 비모델 설정 제거 (max_sample_size 등)
+                model_params = {k: v for k, v in params.items() if k not in ['max_sample_size', 'checkpoint_dir']}
+                
+                # 임시 모델 생성
+                from models.pyspark_als import PySparkALS
+                temp_model = PySparkALS(**model_params)
+                temp_model.spark = spark_session  # 세션 직접 지정
+                
+                # 새로운 세션으로 matrix_data 다시 준비
+                logger.info("새 세션으로 행렬 데이터 준비 중...")
+                # max_sample_size 파라미터가 있으면 별도로 전달
+                max_sample_size = params.get('max_sample_size', 300000)
+                matrix_data = temp_model.prepare_matrices(
+                    interactions_df,
+                    max_sample_size=max_sample_size,
+                    split_strategy='random'
+                )
+                
+                # 임시 모델 정리 (세션은 유지)
+                temp_model.model = None  # 모델 참조만 제거
+                del temp_model
+                gc.collect()
+            except Exception as e:
+                logger.error(f"새 SparkSession 생성 중 오류: {str(e)}")
+                # 오류 발생 시 현재 조합 건너뛰기
+                params['error'] = f"세션 생성 실패: {str(e)}"
+                tuning_results.append(params)
+                continue
+        
+        try:
+            # 파라미터에서 비모델 설정 제거
+            model_params = {k: v for k, v in params.items() if k not in ['max_sample_size', 'checkpoint_dir']}
             
-            # 2. 최적의 하이퍼파라미터 조합 시각화
-            if 'test_huber_loss' in results_df.columns and not results_df['test_huber_loss'].isna().all():
-                best_idx = results_df['test_huber_loss'].fillna(float('inf')).argmin()
-                best_metric = 'test_huber_loss'
-            elif 'test_rmse' in results_df.columns and not results_df['test_rmse'].isna().all():
-                best_idx = results_df['test_rmse'].fillna(float('inf')).argmin()
-                best_metric = 'test_rmse'
+            # 모델 학습 및 평가 - 기존 SparkSession 전달
+            result = run_pyspark_als(model_params, interactions_df, matrix_data, spark_session)
+            tuning_results.append(result)
+            
+            # 진행 상황 로깅
+            if 'validation_weighted_sum' in result:
+                logger.info(f"Validation Weighted Sum: {safe_format(result.get('validation_weighted_sum'))}")
+            
+            huber = result.get('test_huber_loss')
+            rmse = result.get('test_rmse')
+            
+            if huber not in (None, np.nan):
+                logger.info(f"Test Huber Loss: {safe_format(huber, '{:.6f}')}")
+            elif rmse not in (None, np.nan):
+                logger.info(f"Test RMSE: {safe_format(rmse, '{:.6f}')}")
             else:
-                best_idx = results_df['train_time'].fillna(float('inf')).argmin()
-                best_metric = 'train_time'
-                
-            best_config = results_df.iloc[best_idx]
-            best_params = {param: best_config[param] for param in param_keys if param in best_config}
+                logger.info("Test metric unavailable")
             
-            # 최적 파라미터 로깅
-            run.summary["best_parameters"] = best_params
-            run.summary["best_" + best_metric] = best_config.get(best_metric)
+            logger.info(f"학습 시간: {safe_format(result.get('train_time'), '{:.2f}')}초")
             
-            # 다양한 지표를 기준으로 최적 파라미터 추출
-            if 'test_huber_loss' in results_df.columns and not results_df['test_huber_loss'].isna().all():
-                best_huber = results_df.iloc[results_df['test_huber_loss'].fillna(float('inf')).argmin()]
-                logger.info(f"Huber Loss 기준 최적 파라미터: {best_huber[param_keys].to_dict()}")
-                logger.info(f"Best Huber Loss: {best_huber['test_huber_loss']:.4f}")
-                run.summary["best_huber_params"] = best_huber[param_keys].to_dict()
-                run.summary["best_huber_loss"] = best_huber['test_huber_loss']
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"조합 {params} 실행 실패: {error_msg}")
             
-            if 'test_rmse' in results_df.columns and not results_df['test_rmse'].isna().all():
-                best_rmse = results_df.iloc[results_df['test_rmse'].fillna(float('inf')).argmin()]
-                logger.info(f"RMSE 기준 최적 파라미터: {best_rmse[param_keys].to_dict()}")
-                logger.info(f"Best RMSE: {best_rmse['test_rmse']:.4f}")
-                run.summary["best_rmse_params"] = best_rmse[param_keys].to_dict()
-                run.summary["best_rmse"] = best_rmse['test_rmse']
+            # SparkContext 관련 오류 감지
+            if "SparkContext" in error_msg or "Py4J" in error_msg:
+                logger.warning("SparkContext 문제 감지: 새 세션을 생성합니다.")
+                # 세션 리셋
+                try:
+                    if spark_session:
+                        SparkSingleton.stop()
+                except Exception:
+                    pass  # 오류 무시
+                spark_session = None
+                gc.collect()
             
-            if 'train_time' in results_df.columns and not results_df['train_time'].isna().all():
-                best_time = results_df.iloc[results_df['train_time'].fillna(float('inf')).argmin()]
-                logger.info(f"학습 시간 기준 최적 파라미터: {best_time[param_keys].to_dict()}")
-                logger.info(f"Best Train Time: {best_time['train_time']:.2f}초")
-                run.summary["best_time_params"] = best_time[param_keys].to_dict()
-                run.summary["best_train_time"] = best_time['train_time']
+            # 실패한 경우에도 일부 정보 저장
+            params['error'] = error_msg
+            tuning_results.append(params)
             
-            # 3D 시각화 (3개의 주요 성능 지표에 대해)
-            valid_metrics = all(
-                metric in results_df.columns and not results_df[metric].isna().all()
-                for metric in ['test_rmse', 'test_huber_loss', 'train_time']
-            )
-            
-            if valid_metrics:
-                # NaN 값을 제외하고 처리
-                scatter_df = results_df.dropna(subset=['test_rmse', 'test_huber_loss', 'train_time'])
-                if not scatter_df.empty:
-                    scatter_data = [[row['test_rmse'], row['test_huber_loss'], row['train_time']] 
-                                   for _, row in scatter_df.iterrows()]
-                    scatter_table = wandb.Table(data=scatter_data, columns=["test_rmse", "test_huber_loss", "train_time"])
-                    run.log({"performance_3d_scatter": wandb.plot_table(
-                        "wandb/scatter/v0", scatter_table, {"x": "test_rmse", "y": "test_huber_loss", "z": "train_time"},
-                        {"title": "Performance Trade-offs (RMSE vs Huber Loss vs Train Time)"}
-                    )})
-            
+        # 메모리 정리
+        gc.collect()
+    
+    return tuning_results
+
+def find_best_params(results_df, metric_name, higher_is_better=True):
+    """
+    특정 메트릭 기준으로 최적 파라미터 찾아 출력 및 반환
+    
+    Args:
+        results_df: 결과 데이터프레임
+        metric_name: 최적화 기준 메트릭 이름
+        higher_is_better: 높은 값이 좋은지 여부
+        
+    Returns:
+        dict: 최적 파라미터 정보
+    """
+    if metric_name not in results_df.columns:
+        logger.info(f"{metric_name} 메트릭이 결과에 없습니다.")
+        return None
+        
+    # NaN 값을 제외하고 최고값 찾기
+    valid_df = results_df.dropna(subset=[metric_name])
+    if valid_df.empty:
+        logger.info(f"{metric_name}에 대한 유효한 결과가 없습니다.")
+        return None
+        
+    # 최적값 찾기 (높은 값이 좋은지 또는 낮은 값이 좋은지에 따라)
+    if higher_is_better:
+        best_idx = valid_df[metric_name].idxmax()
+    else:
+        best_idx = valid_df[metric_name].idxmin()
+        
+    best_config = results_df.iloc[best_idx]
+    best_value = best_config[metric_name]
+    
+    # 로그 출력
+    logger.info(f"\n=== 최적의 하이퍼파라미터 ({metric_name} 기준) ===")
+    logger.info(f"max_iter: {best_config.get('max_iter', 'N/A')}")
+    logger.info(f"reg_param: {best_config.get('reg_param', 'N/A')}")
+    logger.info(f"rank: {best_config.get('rank', 'N/A')}")
+    logger.info(f"Best {metric_name}: {safe_format(best_value)}")
+    
+    # 최적 하이퍼파라미터 정보 반환
+    return {
+        "metric": metric_name,
+        "value": float(best_value),
+        "params": {
+            "max_iter": int(best_config.get('max_iter', 0)),
+            "reg_param": float(best_config.get('reg_param', 0)),
+            "rank": int(best_config.get('rank', 0))
+        }
+    }
+
+def save_results(tuning_results, output_dir, timestamp, model_config, days):
+    """
+    튜닝 결과 저장 및 시각화
+    
+    Args:
+        tuning_results: 튜닝 결과 리스트
+        output_dir: 출력 디렉토리
+        timestamp: 실행 타임스탬프
+        model_config: 모델 설정
+        days: 데이터 로드 기간
+        
+    Returns:
+        최적 파라미터 정보 딕셔너리
+    """
+    logger.info("튜닝 결과 저장 및 시각화 중...")
+    
+    # 결과를 DataFrame으로 변환
+    results_df = pd.DataFrame(tuning_results)
+    
+    # 결과 파일 저장
+    results_path = os.path.join(output_dir, f"tuning_results.csv")
+    results_df.to_csv(results_path, index=False)
+    logger.info(f"튜닝 결과가 {results_path}에 저장되었습니다.")
+    
+    # 실행 설정 저장
+    config_info = {
+        "model_type": "pyspark_als",
+        "days": days,
+        "test_size": 0.2,
+        "random_state": 42,
+        "hyperparameters_tested": len(tuning_results),
+        "data_size": len(tuning_results),
+        "timestamp": timestamp,
+        "parameter_space": {k: v for k, v in model_config.items() if isinstance(v, list)}
+    }
+    
+    # 설정 정보 저장
+    with open(os.path.join(output_dir, "config_info.json"), "w") as f:
+        json.dump(config_info, f, indent=2)
+    
+    # 결과 시각화
+    visualize_results(results_df, output_dir)
+    
+    # 최적의 하이퍼파라미터 출력
+    best_metrics = {}
+    
+    # 각 메트릭 기준으로 최적 파라미터 찾기
+    vws_best = find_best_params(results_df, 'validation_weighted_sum', higher_is_better=True)
+    if vws_best:
+        best_metrics['validation_weighted_sum'] = vws_best
+        
+    huber_best = find_best_params(results_df, 'test_huber_loss', higher_is_better=False)
+    if huber_best:
+        best_metrics['test_huber_loss'] = huber_best
+        
+    rmse_best = find_best_params(results_df, 'test_rmse', higher_is_better=False)
+    if rmse_best:
+        best_metrics['test_rmse'] = rmse_best
+    
+    # 최적 파라미터 정보가 없는 경우
+    if not best_metrics:
+        logger.warning("유효한 평가 결과가 없어 최적 파라미터를 찾을 수 없습니다.")
+    
+    # 모든 최적 파라미터 JSON으로 저장
+    with open(os.path.join(output_dir, "best_params.json"), "w") as f:
+        json.dump(best_metrics, f, indent=2)
+    
+    return best_metrics
+
+def generate_param_combinations(model_config):
+    """
+    하이퍼파라미터 조합 생성
+    
+    Args:
+        model_config: 모델 설정
+        
+    Returns:
+        list: 모델 파라미터 리스트
+    """
+    # 튜닝할 파라미터와 고정 파라미터 분리
+    tuning_params = {}
+    fixed_params = {}
+    non_model_params = {}
+    
+    for key, value in model_config.items():
+        if isinstance(value, list):
+            tuning_params[key] = value
+        elif key in ['max_sample_size', 'checkpoint_dir']:
+            # 비모델 파라미터는 별도로 저장
+            non_model_params[key] = value
+        else:
+            fixed_params[key] = value
+    
+    # 하이퍼파라미터 조합 생성
+    param_keys = list(tuning_params.keys())
+    param_values = [tuning_params[key] for key in param_keys]
+    
+    all_params_list = []
+    for params_tuple in itertools.product(*param_values):
+        # 파라미터 딕셔너리 생성 - 튜닝 파라미터
+        params = {
+            param_keys[i]: params_tuple[i] 
+            for i in range(len(param_keys))
+        }
+        
+        # 고정 파라미터 추가
+        for key, value in fixed_params.items():
+            params[key] = value
+        
+        # 비모델 파라미터 추가 (prepare_matrices 호출 시 사용됨)
+        for key, value in non_model_params.items():
+            params[key] = value
+        
+        all_params_list.append(params)
+    
+    logger.info(f"총 {len(all_params_list)}개의 하이퍼파라미터 조합 생성")
+    return all_params_list
+
+def main():
+    """하이퍼파라미터 튜닝 실행"""
+    try:
+        logger.info("PySpark ALS 하이퍼파라미터 튜닝 시작")
+        
+        # 1. 설정 로드
+        days = TUNING_CONFIG['default_params']['days']
+        base_output_dir = TUNING_CONFIG['default_params']['output_dir']
+        model_config = TUNING_CONFIG['pyspark_als']
+        
+        # 현재 시간 기반 폴더명 생성
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        process_dir = f"pyspark_als_{timestamp}"
+        output_dir = os.path.join(base_output_dir, process_dir)
+        os.makedirs(output_dir, exist_ok=True)
+        logger.info(f"결과 저장 폴더: {output_dir}")
+        
+        # 2. 데이터 로드
+        interactions_df = load_data(
+            days=days, 
+            use_test_db=True, 
+            interaction_weights=model_config.get('interaction_weights')
+        )
+        
+        # 3. 하이퍼파라미터 조합 생성
+        params_list = generate_param_combinations(model_config)
+        
+        # 4. Spark 세션 준비
+        spark_session = prepare_spark(f"PySparkALS_Tuning_{timestamp}")
+        
+        # 5. 행렬 데이터 준비
+        init_model, matrix_data = prepare_matrices(interactions_df, spark_session, model_config)
+        
+        # 메모리 관리를 위해 모델 객체 제거 (SparkSession은 유지)
+        init_model.model = None  # 모델 참조만 제거
+        del init_model
+        gc.collect()
+        
+        # 6. 튜닝 루프 실행
+        tuning_results = run_tuning(params_list, interactions_df, matrix_data, spark_session)
+        
+        # 7. 결과 저장 및 시각화
+        best_metrics = save_results(tuning_results, output_dir, timestamp, model_config, days)
+        
+        logger.info("하이퍼파라미터 튜닝 완료")
+        
     except Exception as e:
         logger.error(f"오류 발생: {str(e)}")
         raise
+    finally:
+        # 모든 작업 완료 후 SparkSession 종료
+        if 'spark_session' in locals() and spark_session:
+            try:
+                logger.info("SparkSession 종료 중...")
+                SparkSingleton.stop()
+                logger.info("SparkSession 종료 완료")
+            except Exception as e:
+                logger.warning(f"SparkSession 종료 중 오류: {e}")
 
 if __name__ == "__main__":
     main() 
