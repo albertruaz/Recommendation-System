@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 from database.recommendation_db import RecommendationDB
 from model_als.pyspark_als import PySparkALS
-from utils.logger import setup_logger
+from utils.logger import setup_logger, overall_log
 from utils.recommendation_utils import save_recommendations
 
 from sklearn.model_selection import train_test_split
@@ -173,6 +173,9 @@ class RunALS:
                 self.logger.info(f"- RMSE: {test_result['rmse']:.4f}")
                 self.logger.info(f"- 샘플 수: {test_result['samples']}")
             save_recommendations(recommendations_df)
+            
+            # 전체 실행 로그 저장
+            overall_log(train_result, test_result)
             
             return result
             
