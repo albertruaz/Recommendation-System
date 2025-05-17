@@ -23,9 +23,9 @@ def main():
         # logger.info("ALS 모듈 실행")
         # als_runner = RunALS()
         # result = als_runner.run()
-        for max_iter in [10, 30, 50]:
-            for reg_param in [0.001, 0.01, 0.1]:
-                for rank in [10, 20, 30]:
+        for max_iter in [10, 20, 30]:
+            for reg_param in [0.01, 0.1]:
+                for rank in [10, 15, 20]:
                     als2_runner = RunALSTuning(max_iter, reg_param, rank)
                     result = als2_runner.run()
                     logger.info(f"max_iter: {max_iter}, reg_param: {reg_param}, rank: {rank}, result: {result}")

@@ -39,7 +39,8 @@ class RunALSTuning:
         self.enable_loss_calculation = self.als_config['testing'].get('calculate_loss', True)
         
         self.model = None
-        self.test_data = None
+        self.test_df = None
+        self.train_df = None
 
     def load_interactions(self) -> pd.DataFrame:
         """상호작용 데이터 로드"""
@@ -72,41 +73,41 @@ class RunALSTuning:
         if data_df is None or data_df.empty or self.model is None:
             return None
         try:
-            # 모델의 test 메서드를 사용하여 데이터에 대한 예측 생성
-            result_df = self.model.test(data_df)
-            
-            # 유효한 예측이 있는 행만 필터링
-            valid_predictions = result_df.dropna(subset=['prediction'])
+
+            valid_predictions = data_df.dropna(subset=['prediction'])
             
             if len(valid_predictions) == 0:
                 return {
                     "mae": float('nan'), 
-                    "rmse": float('nan'), 
+                    "rmse": float('nan'),
+                    "same_direction": float('nan'),
                     "samples": 0
                 }
-            
-            # 손실 계산
-            if 'rating' not in valid_predictions.columns and 'interaction_type' in valid_predictions.columns:
-                valid_predictions['rating'] = valid_predictions['interaction_type'].map(
-                    self.als_config['pyspark_als']['interaction_weights']
-                )
             
             actual = valid_predictions['rating'].values
             pred = valid_predictions['prediction'].values
             
             mae = np.mean(np.abs(actual - pred))
             rmse = np.sqrt(np.mean(np.square(actual - pred)))
+            # 방향성 지표 계산 - 2를 기준으로 actual과 prediction이 같은 방향에 있는지 확인
+            # (actual > 2 and pred > 2) OR (actual < 2 and pred < 2) OR (actual == 2 and pred == 2)
+            same_direction = np.mean(
+                ((actual > 2) & (pred > 2)) | 
+                ((actual < 2) & (pred < 2)) | 
+                ((actual == 2) & (pred == 2))
+            )
             
             result_path = None
             if data_type == 'test':
                 os.makedirs(self.output_dir, exist_ok=True)
                 result_path = os.path.join(self.output_dir, f'{data_type}_predictions_{self.days}days.csv')
-                result_df.to_csv(result_path, index=False)
+                data_df.to_csv(result_path, index=False)
                 self.logger.info(f"{data_type.capitalize()} 예측 결과가 {result_path}에 저장되었습니다.")
             
             result = {
                 "mae": float(mae),
                 "rmse": float(rmse),
+                "same_direction": float(same_direction),
                 "samples": len(valid_predictions)
             }
             
@@ -128,14 +129,13 @@ class RunALSTuning:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             unique_id = str(uuid.uuid4())[:8]  # UUID의 첫 8자만 사용
             run_id = f"{timestamp}_{unique_id}"
+            output_dir_with_id = os.path.join(self.output_dir, run_id)
+            os.makedirs(output_dir_with_id, exist_ok=True)
             
-            # 상호작용 데이터 로드
+            
             interactions_df = self.load_interactions()
+            self.train_df, self.test_df = self.split_data(interactions_df)
             
-            # 데이터 분할 (필요한 경우)
-            train_df, self.test_data = self.split_data(interactions_df)
-            
-            # 모델 초기화
             self.model = PySparkALS(
                 max_iter=self.als_config['pyspark_als']['max_iter'],
                 reg_param=self.als_config['pyspark_als']['reg_param'],
@@ -147,7 +147,7 @@ class RunALSTuning:
             )
             
             # 전체 데이터로 인덱스 구성, 학습 데이터만 사용하여 학습
-            matrix_data = self.model.prepare_matrices(interactions_df, train_df=train_df)
+            matrix_data = self.model.prepare_matrices(interactions_df, train_df=self.train_df)
             
             # 모델 학습
             self.logger.info("모델 학습 시작")
@@ -156,16 +156,15 @@ class RunALSTuning:
             # 추천 생성
             recommendations_df = self.model.generate_recommendations(top_n=self.top_n)
             
-            # 파일 이름에 run_id 추가
-            output_dir_with_id = os.path.join(self.output_dir, run_id)
-            os.makedirs(output_dir_with_id, exist_ok=True)
-            
             train_result = None
             test_result = None
             if self.enable_loss_calculation:
-                train_result = self.calculate_loss(train_df, 'train')
-            if self.split_test_data and self.enable_loss_calculation and self.test_data is not None:
-                test_result = self.calculate_loss(self.test_data, 'test')
+                self.train_predictions = self.model.test(self.train_df)
+                train_result = self.calculate_loss(self.train_predictions, 'train')
+            if self.split_test_data and self.enable_loss_calculation and self.test_df is not None:
+                self.test_predictions = self.model.test(self.test_df)
+                test_result = self.calculate_loss(self.test_predictions, 'test')
+            
             
             # 결과 반환
             result = {
@@ -178,6 +177,7 @@ class RunALSTuning:
                 self.logger.info(f"학습 데이터 결과:")
                 self.logger.info(f"- MAE: {train_result['mae']:.4f}")
                 self.logger.info(f"- RMSE: {train_result['rmse']:.4f}")
+                self.logger.info(f"- 방향성 일치도: {train_result['same_direction']:.4f}")
                 self.logger.info(f"- 샘플 수: {train_result['samples']}")
             
             # 테스트 결과 정보 출력 (있는 경우)
@@ -185,10 +185,11 @@ class RunALSTuning:
                 self.logger.info(f"테스트 데이터 결과:")
                 self.logger.info(f"- MAE: {test_result['mae']:.4f}")
                 self.logger.info(f"- RMSE: {test_result['rmse']:.4f}")
+                self.logger.info(f"- 방향성 일치도: {test_result['same_direction']:.4f}")
                 self.logger.info(f"- 샘플 수: {test_result['samples']}")
             save_recommendations(recommendations_df, output_dir=output_dir_with_id)
             # 전체 실행 로그 저장 - run_id 전달
-            overall_log(run_id, train_result, test_result)
+            overall_log(run_id, train_result, test_result, self.als_config)
             
             return result
             
@@ -207,13 +208,20 @@ class RunALSTuning:
 
 # 직접 실행할 경우의 예시
 if __name__ == "__main__":
-    als_runner = RunALS()
+    # 기본 하이퍼파라미터 설정
+    max_iter = 50
+    reg_param = 0.01
+    rank = 10
+    
+    als_runner = RunALSTuning(max_iter, reg_param, rank)
     result = als_runner.run()
     if 'recommendations' in result:
         print(f"추천 결과: {len(result['recommendations'])}개")
     if 'train_result' in result and result['train_result'] is not None:
         print(f"훈련 데이터 MAE: {result['train_result']['mae']:.4f}")
         print(f"훈련 데이터 RMSE: {result['train_result']['rmse']:.4f}")
+        print(f"훈련 데이터 방향성 일치도: {result['train_result']['same_direction']:.4f}")
     if 'test_result' in result and result['test_result'] is not None:
         print(f"테스트 데이터 MAE: {result['test_result']['mae']:.4f}")
-        print(f"테스트 데이터 RMSE: {result['test_result']['rmse']:.4f}") 
+        print(f"테스트 데이터 RMSE: {result['test_result']['rmse']:.4f}")
+        print(f"테스트 데이터 방향성 일치도: {result['test_result']['same_direction']:.4f}") 
