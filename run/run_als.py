@@ -39,7 +39,7 @@ class RunALS:
     def load_interactions(self) -> pd.DataFrame:
         """상호작용 데이터 로드"""
         db = RecommendationDB()  
-        interactions = db.get_user_item_interactions(days=self.days)
+        interactions = db.get_user_item_interactions(days=self.days, use_cache=True)
         
         if interactions.empty:
             self.logger.error(f"최근 {self.days}일 간의 상호작용 데이터가 없습니다.")
@@ -173,7 +173,6 @@ class RunALS:
                 self.logger.info(f"- RMSE: {test_result['rmse']:.4f}")
                 self.logger.info(f"- 샘플 수: {test_result['samples']}")
             save_recommendations(recommendations_df)
-            
             # 전체 실행 로그 저장
             overall_log(train_result, test_result)
             

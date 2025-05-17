@@ -3,7 +3,7 @@
   "pyspark_als": {
     "max_iter": 15,
     "reg_param": 0.001,
-    "rank": 15,
+    "rank": 40,
     "interaction_weights": {
       "impression1": 1.0,
       "impression2": 0.5,

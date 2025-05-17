@@ -64,7 +64,7 @@ def overall_log(train_result, test_result):
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, 'overall_als.log')
     
-    # 고유 이름 생성 (현재 날짜/시간 + UUID)
+    # name 생성 (현재 날짜/시간 + UUID)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     unique_id = str(uuid.uuid4())[:8]  # UUID의 첫 8자만 사용
     run_id = f"{timestamp}_{unique_id}"
@@ -79,7 +79,7 @@ def overall_log(train_result, test_result):
     
     # 로그 데이터 구성
     log_data = {
-        "고유 이름": run_id,
+        "name": run_id,
         "check": train_result is not None,  # 학습 결과가 있으면 성공으로 간주
         "als_config": als_config,
         "train_result": train_result,
@@ -94,15 +94,20 @@ def overall_log(train_result, test_result):
             with open(log_file, 'r', encoding='utf-8') as f:
                 content = f.read().strip()
                 if content:
-                    existing_logs = [json.loads(line) for line in content.split('\n')]
+                    # 각 줄을 JSON 객체로 파싱
+                    for line in content.split('\n'):
+                        if line.strip():  # 빈 줄 무시
+                            existing_logs.append(json.loads(line))
         
         # 새 로그 추가
         existing_logs.append(log_data)
         
-        # 파일에 저장
+        # 파일에 저장 - 들여쓰기와 줄바꿈 포맷으로 저장
         with open(log_file, 'w', encoding='utf-8') as f:
             for log_entry in existing_logs:
-                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+                # 각 로그 항목을 들여쓰기된 JSON으로 변환하고 줄바꿈 추가
+                formatted_json = json.dumps(log_entry, ensure_ascii=False, indent=2)
+                f.write(formatted_json + '\n\n')  # 로그 항목 사이에 빈 줄 추가
         
         # 로깅 성공 메시지
         print(f"실행 로그가 {log_file}에 저장되었습니다.")

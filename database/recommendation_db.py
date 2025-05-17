@@ -10,6 +10,8 @@ from typing import Optional
 from .db_connector import DBConnector
 from sqlalchemy import text
 from utils.logger import setup_logger
+import os
+from datetime import datetime
 
 class RecommendationDB:
     """추천 시스템을 위한 데이터베이스 유틸리티 클래스"""
@@ -18,18 +20,49 @@ class RecommendationDB:
         """데이터베이스 연결 초기화"""
         self.db = DBConnector()
         self.logger = setup_logger('db')
+        # 캐시 디렉토리 설정
+        self.cache_dir = "cache/interactions"
+        os.makedirs(self.cache_dir, exist_ok=True)
     
-    def get_user_item_interactions(self, days: int = 1) -> pd.DataFrame:
+    def get_user_item_interactions(self, days: int = 1, use_cache: bool = True) -> pd.DataFrame:
         """
         사용자-아이템 상호작용 데이터를 가져옵니다.
         
         Args:
             days (int, optional): 최근 몇 일간의 데이터를 가져올지 지정
+            use_cache (bool, optional): 캐시 사용 여부
             
         Returns:
             pd.DataFrame: 상호작용 데이터
         """
+        today = datetime.now().strftime("%Y%m%d")
+        cache_file = os.path.join(self.cache_dir, f"interactions_{days}days_{today}.csv")
+        
+        # 캐시 파일이 존재하고 사용 가능한 경우
+        if use_cache and os.path.exists(cache_file):
+            self.logger.info(f"캐시 파일 {cache_file}에서 데이터를 불러옵니다.")
+            try:
+                df = pd.read_csv(cache_file)
+                df['member_id'] = pd.to_numeric(df['member_id'], errors='coerce').astype('Int64')
+                df['product_id'] = pd.to_numeric(df['product_id'], errors='coerce').astype('Int64')
+                
+                # 데이터 통계 로깅
+                self.logger.info(f"고유 사용자 수: {df['member_id'].nunique()}")
+                self.logger.info(f"고유 상품 수: {df['product_id'].nunique()}")
+                
+                # 상호작용 타입별 통계
+                interaction_stats = df.groupby('interaction_type').size()
+                self.logger.info("\n상호작용 타입별 통계:")
+                for interaction_type, count in interaction_stats.items():
+                    self.logger.info(f"- {interaction_type}: {count}건")
+                
+                return df
+            except Exception as e:
+                self.logger.warning(f"캐시 파일 로드 중 오류 발생: {str(e)}. DB에서 직접 데이터를 가져옵니다.")
+                # 캐시 파일 로드 실패 시 DB에서 직접 가져오기로 진행
+        
         try:
+            self.logger.info(f"DB에서 {days}일간의 상호작용 데이터를 가져옵니다.")
             query = """
                 WITH impression AS (
                     SELECT 
@@ -125,7 +158,11 @@ class RecommendationDB:
             """
 
             with self.db.get_connection() as conn:
+                start_time = datetime.now()
                 df = pd.read_sql(text(query), conn, params={'days': days})
+                end_time = datetime.now()
+                query_time = (end_time - start_time).total_seconds()
+                self.logger.info(f"DB 쿼리 완료. 소요 시간: {query_time:.2f}초")
                 
                 df['member_id'] = pd.to_numeric(df['member_id'], errors='coerce').astype('Int64')
                 df['product_id'] = pd.to_numeric(df['product_id'], errors='coerce').astype('Int64')
@@ -141,6 +178,14 @@ class RecommendationDB:
                 self.logger.info("\n상호작용 타입별 통계:")
                 for interaction_type, count in interaction_stats.items():
                     self.logger.info(f"- {interaction_type}: {count}건")
+                
+                # 캐시 파일 저장
+                if use_cache:
+                    try:
+                        df.to_csv(cache_file, index=False)
+                        self.logger.info(f"상호작용 데이터가 캐시 파일 {cache_file}에 저장되었습니다.")
+                    except Exception as e:
+                        self.logger.warning(f"캐시 파일 저장 중 오류 발생: {str(e)}")
                 
                 return df
                 
