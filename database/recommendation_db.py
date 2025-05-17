@@ -19,7 +19,7 @@ class RecommendationDB:
         self.db = DBConnector()
         self.logger = setup_logger('db')
     
-    def get_user_item_interactions(self, days: Optional[int] = None) -> pd.DataFrame:
+    def get_user_item_interactions(self, days: int = 1) -> pd.DataFrame:
         """
         사용자-아이템 상호작용 데이터를 가져옵니다.
         
@@ -30,9 +30,6 @@ class RecommendationDB:
             pd.DataFrame: 상호작용 데이터
         """
         try:
-            if days is None:
-                days = 30
-            
             query = """
                 WITH impression AS (
                     SELECT 
@@ -113,7 +110,7 @@ class RecommendationDB:
                 SELECT 
                     member_id,
                     product_id,
-                    interaction_type,
+                    interaction_type
                 FROM user_product_interactions
                 WHERE member_id IS NOT NULL
                   AND product_id IS NOT NULL
@@ -128,9 +125,8 @@ class RecommendationDB:
             """
 
             with self.db.get_connection() as conn:
-
                 df = pd.read_sql(text(query), conn, params={'days': days})
-                # 데이터 타입 변환 및 NULL 값 제거
+                
                 df['member_id'] = pd.to_numeric(df['member_id'], errors='coerce').astype('Int64')
                 df['product_id'] = pd.to_numeric(df['product_id'], errors='coerce').astype('Int64')
                 df = df.dropna(subset=['member_id', 'product_id'])

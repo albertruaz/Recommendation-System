@@ -17,7 +17,7 @@ import os
 import gc
 import time
 
-from models.base_als import BaseALS
+from model_als.base_als import BaseALS
 from utils.spark_utils import SparkSingleton, safe_format, calculate_huber_loss, apply_prediction_cap, evaluate_model, calculate_validation_weighted_sum_spark
 
 class PySparkALS(BaseALS):
@@ -31,7 +31,8 @@ class PySparkALS(BaseALS):
                  alpha: float = 1.0,
                  interaction_weights: dict = None,
                  max_prediction: float = 50.0,
-                 huber_delta: float = 10.0):
+                 huber_delta: float = 10.0,
+                 split_test_data: bool = False):
         super().__init__(max_iter, reg_param, rank, random_state)
         self.interaction_weights = interaction_weights or {
             "impression1": 1.0,
@@ -48,6 +49,7 @@ class PySparkALS(BaseALS):
         self.model = None
         self.max_prediction = max_prediction  # 예측값 상한
         self.huber_delta = huber_delta  # Huber Loss의 델타값
+        self.split_test_data = split_test_data  # 테스트 데이터 분할 여부
         self._session_created_internally = False  # 세션이 내부에서 생성되었는지 추적
     
     def _create_spark_session(self):
@@ -60,28 +62,29 @@ class PySparkALS(BaseALS):
         
         return self.spark
     
-    def prepare_matrices(self, interactions_df: pd.DataFrame, max_sample_size=300000, split_strategy='random'):
+    def prepare_matrices(self, interactions_df: pd.DataFrame, train_df=None, max_sample_size=300000, split_strategy='random'):
         """
         상호작용 데이터를 PySpark DataFrame으로 변환하고 훈련/테스트 데이터로 분할
         
         Args:
             interactions_df: 원본 상호작용 데이터프레임
+            test_df: 테스트 데이터프레임 (split_test_data가 True인 경우 사용)
             max_sample_size: 최대 샘플 크기 (기본값: 30만)
             split_strategy: 분할 전략 ('random': 무작위 분할, 'user': 사용자 기반 분할)
             
         Returns:
             tuple: (ratings_df, train_data, test_data) 형태의 Spark DataFrame 튜플
         """
-        # 1) 인덱스 매핑
+        # 1) 인덱스 매핑 (항상 전체 데이터에 대해 인덱스 생성)
         self._prepare_indices(interactions_df)
         
-        # 2) rating 계산 (interaction_weights에서 바로 가져옵니다)
+        if train_df is not None:
+            interactions_df = train_df
+        
         if 'rating' not in interactions_df.columns:
             interactions_df['rating'] = interactions_df['interaction_type'].map(self.interaction_weights)
-        
-        # 3) rating == 0 인 데이터만 제외
         filtered = interactions_df[interactions_df['rating'] > 0].copy()
-        
+
         # 데이터 양이 너무 많은 경우 샘플링
         if len(filtered) > max_sample_size:
             self.logger.info(f"데이터가 너무 많아 샘플링합니다: {len(filtered)}개 → {max_sample_size}개")
@@ -100,94 +103,30 @@ class PySparkALS(BaseALS):
             # 한 번에 Spark DataFrame 생성 (PySpark가 내부적으로 적절히 분할함)
             self.logger.info("Spark DataFrame 생성 중...")
             ratings_df = self.spark.createDataFrame(als_data)
-            
-            # 파티션 수 최적화
             max_partitions = 2  # 최대 파티션 수 제한
             ratings_df = ratings_df.repartition(max_partitions)
-            
-            # 항상 랜덤 분할 사용 (시드 적용하여 일관성 유지)
-            return self._split_random(ratings_df)
-            
+            return ratings_df
+        
         except Exception as e:
             self.logger.error(f"데이터 변환 중 오류 발생: {str(e)}")
-            # 오류 발생 시 SparkSession 종료 시도
             if self.spark is not None and SparkSession._instantiatedSession:
                 try:
                     SparkSingleton.stop()
                 except:
                     pass
-            # 예외 다시 발생
             raise
     
-    def _split_by_user(self, ratings_df):
+    def train(self, matrix_data) -> None:
         """
-        사용자 기반 분할 수행 (cold start 문제 방지)
+        PySpark ALS 모델 학습
         
         Args:
-            ratings_df: 평점 데이터 Spark DataFrame
-        
-        Returns:
-            tuple: (ratings_df, train_data, test_data) 형태의 Spark DataFrame 튜플
-        """
-        self.logger.info("사용자 기반 train-test 분할 수행 (8:2)...")
-        
-        # 고유 사용자 추출 및 분할
-        users = ratings_df.select("member_id").distinct()
-        train_users, test_users = users.randomSplit([0.8, 0.2], seed=self.random_state)
-        
-        # 사용자 기반으로 데이터 분할
-        train_data = ratings_df.join(train_users, "member_id")
-        test_data = ratings_df.join(test_users, "member_id")
-        
-        # 데이터 크기 로깅
-        train_size = train_data.count()
-        test_size = test_data.count()
-        self.logger.info(f"훈련/테스트 데이터 크기: {train_size}/{test_size}개")
-        
-        return ratings_df, train_data, test_data
-
-    def _split_random(self, ratings_df):
-        """
-        랜덤 분할 수행
-        
-        Args:
-            ratings_df: 평점 데이터 Spark DataFrame
-        
-        Returns:
-            tuple: (ratings_df, train_data, test_data) 형태의 Spark DataFrame 튜플
-        """
-        self.logger.info("랜덤 train-test 분할 수행 (8:2)...")
-        train_data, test_data = ratings_df.randomSplit([0.8, 0.2], seed=self.random_state)
-        
-        # 훈련/테스트 데이터 크기 로깅
-        try:
-            train_size = train_data.count()
-            test_size = test_data.count()
-            self.logger.info(f"훈련/테스트 데이터 크기: {train_size}/{test_size}개")
-        except:
-            # count()가 실패할 경우 대략적인 예상치 출력
-            total_size = ratings_df.count()
-            train_size = total_size * 0.8
-            test_size = total_size * 0.2
-            self.logger.info(f"훈련/테스트 데이터 예상 크기: {train_size:.0f}/{test_size:.0f}개")
-        
-        return ratings_df, train_data, test_data
-    
-    def train(self, interactions_df, matrix_data) -> None:
-        """
-        PySpark ALS 모델 학습 및 평가
-        
-        Args:
-            interactions_df: 상호작용 데이터프레임 (원본 사용자-상품 데이터)
-            matrix_data: (ratings_df, train_data, test_data) 형태의 Spark DataFrame 튜플
+            matrix_data: Spark DataFrame 형태의 학습 데이터
         """
         try:
             # 세션 상태 확인
             if self.spark is None or not SparkSingleton.is_active(self.spark):
                 raise RuntimeError("SparkSession이 활성 상태가 아닙니다. 새 세션이 필요합니다.")
-            
-            # 데이터 언패킹
-            _, train_data, test_data = matrix_data
             
             # 학습 시작 로깅
             self.logger.info(f"\n=== PySpark ALS 학습 시작 ===")
@@ -221,49 +160,16 @@ class PySparkALS(BaseALS):
                 self.logger.info(f"높은 rank({self.rank}) 또는 iter({self.max_iter}) 감지: 체크포인트 활성화 ({checkpoint_dir})")
                 self.spark.sparkContext.setCheckpointDir(checkpoint_dir)
             
-            self.model = als.fit(train_data)
+            # matrix_data로 직접 학습
+            self.model = als.fit(matrix_data)
             train_time = time.time() - start_time
-            
             self.logger.info(f"학습 완료 (소요 시간: {safe_format(train_time, '{:.2f}')}초)")
-            
-            # 메모리 관리
             gc.collect()
-            
-            # 모델 평가
-            self.logger.info("모델 평가 중...")
-            
-            # evaluate_model 함수 사용하여 모델 평가
-            self.metrics = evaluate_model(
-                model=self.model,
-                train_data=train_data,
-                test_data=test_data,
-                huber_delta=self.huber_delta,
-                max_prediction=self.max_prediction
-            )
-            
-            # 평가 결과 로깅
-            self.logger.info(f"Train RMSE: {safe_format(self.metrics.get('train_rmse'))}")
-            self.logger.info(f"Train Huber Loss: {safe_format(self.metrics.get('train_huber_loss'))}")
-            self.logger.info(f"Test RMSE: {safe_format(self.metrics.get('test_rmse'))}")
-            self.logger.info(f"Test Huber Loss: {safe_format(self.metrics.get('test_huber_loss'))}")
-            
-            # 3. [메모리 위험 구간] 잠재 요인 추출 - 별도 try 블록으로 분리하여 실패해도 지표는 유지
             self._extract_factors_safely()
-            
-            self.logger.info("=== 모델 학습 및 평가 완료 ===\n")
+            self.logger.info("=== 모델 학습 완료 ===\n")
             
         except Exception as e:
             self.logger.error(f"모델 학습 중 오류: {str(e)}")
-            # 오류 발생 시 최소한의 값 설정
-            self.metrics = {
-                'train_rmse': float('nan'),
-                'train_huber_loss': float('nan'),
-                'test_rmse': float('nan'),
-                'test_huber_loss': float('nan'),
-                'validation_weighted_sum': float('nan')
-            }
-            
-            # 기본 잠재 요인 설정 (사용할 수 없는 경우)
             if hasattr(self, 'user2idx') and hasattr(self, 'item2idx'):
                 self.user_factors = np.zeros((len(self.user2idx), self.rank))
                 self.item_factors = np.zeros((len(self.item2idx), self.rank))
@@ -386,8 +292,6 @@ class PySparkALS(BaseALS):
         try:
             # 예측 수행
             predictions = self.model.transform(test_data)
-            
-            # 예측값 상한 적용 (메모리 효율적인 방식으로)
             predictions = apply_prediction_cap(predictions, self.max_prediction)
             
             return predictions
@@ -448,20 +352,53 @@ class PySparkALS(BaseALS):
             # 정리 중 오류가 발생해도 계속 진행 
             pass 
 
-    def _calculate_validation_weighted_sum_spark(self, test_data_spark, top_n=20):
+    def test(self, test_df):
         """
-        외부 utility 함수를 사용하여 추천 품질 점수 계산
+        테스트 데이터에 대한 예측을 생성하고 결과를 반환합니다.
         
         Args:
-            test_data_spark: 테스트/검증 데이터 (Spark DataFrame)
-            top_n: 각 사용자마다 고려할 추천 상품 수
+            test_df: 테스트 데이터프레임 (pandas DataFrame)
             
         Returns:
-            float: 검증 데이터에 대한 추천 품질 점수 (가중치 합)
+            pandas DataFrame: 원본 테스트 데이터와 예측값이 추가된 데이터프레임
         """
-        return calculate_validation_weighted_sum_spark(
-            model=self.model,
-            test_data_spark=test_data_spark,
-            top_n=top_n,
-            logger=self.logger
-        ) 
+        if self.model is None:
+            raise ValueError("모델이 학습되지 않았습니다. train()을 먼저 호출하세요.")
+            
+        self.logger.info(f"테스트 데이터({len(test_df)}개)에 대한 예측 생성 중...")
+        
+        try:
+            # rating 열 추가 (필요한 경우)
+            if 'rating' not in test_df.columns and 'interaction_type' in test_df.columns:
+                test_df['rating'] = test_df['interaction_type'].map(self.interaction_weights)
+            
+            # Spark DataFrame으로 변환
+            test_spark_df = self.spark.createDataFrame(
+                test_df[['member_id', 'product_id', 'rating']]
+            )
+            
+            # 예측 생성
+            predictions = self.transform(test_spark_df)
+            
+            # 결과를 pandas DataFrame으로 변환
+            result_df = predictions.select(
+                'member_id', 'product_id', 'rating', 'prediction'
+            ).toPandas()
+            
+            # 원본 데이터와 병합
+            # 'prediction' 열만 유지하면서 원본 테스트 데이터프레임과 병합
+            merged_df = pd.merge(
+                test_df,
+                result_df[['member_id', 'product_id', 'prediction']],
+                on=['member_id', 'product_id'],
+                how='left'
+            )
+            
+            self.logger.info(f"테스트 데이터에 대한 예측 생성 완료. 유효한 예측: {len(merged_df.dropna(subset=['prediction']))}개")
+            
+            return merged_df
+            
+        except Exception as e:
+            self.logger.error(f"테스트 중 오류 발생: {str(e)}")
+            # 오류 발생 시 원본 데이터 반환
+            return test_df 
