@@ -28,6 +28,10 @@ mysql-connector-python>=9.2.0
 PyMySQL>=1.1.0
 SQLAlchemy>=2.0.0
 
+# Vector DB 연결용 패키지
+psycopg2-binary>=2.9.9  # PostgreSQL 드라이버
+sshtunnel>=0.4.0  # SSH 터널링
+
 # 유틸리티
 python-json-logger>=3.3.0
 wandb==0.16.5  # Weights & Biases for experiment tracking 

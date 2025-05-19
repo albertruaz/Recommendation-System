@@ -192,3 +192,76 @@ class RecommendationDB:
         except Exception as e:
             self.logger.error(f"데이터베이스에서 상호작용 데이터 가져오기 실패: {str(e)}")
             raise 
+            
+    def get_recent_cart_items(self, days: int = 30) -> pd.DataFrame:
+        """
+        사용자별 최근 장바구니에 담은 상품 목록을 가져옵니다.
+        
+        Args:
+            days (int, optional): 최근 몇 일간의 데이터를 가져올지 지정
+            
+        Returns:
+            pd.DataFrame: 장바구니 상품 데이터 (member_id, product_id, created_at 컬럼 포함)
+        """
+        cache_file = os.path.join(self.cache_dir, f"cart_items_{days}days_{datetime.now().strftime('%Y%m%d')}.csv")
+        
+        # 캐시 확인
+        if os.path.exists(cache_file):
+            self.logger.info(f"캐시 파일 {cache_file}에서 장바구니 데이터를 불러옵니다.")
+            try:
+                df = pd.read_csv(cache_file)
+                if 'created_at' in df.columns:
+                    df['created_at'] = pd.to_datetime(df['created_at'])
+                
+                self.logger.info(f"총 {len(df)}개의 장바구니 데이터 로드 완료")
+                self.logger.info(f"고유 사용자 수: {df['member_id'].nunique()}")
+                self.logger.info(f"고유 상품 수: {df['product_id'].nunique()}")
+                
+                return df
+            except Exception as e:
+                self.logger.warning(f"캐시 파일 로드 중 오류 발생: {str(e)}. DB에서 직접 데이터를 가져옵니다.")
+        
+        try:
+            self.logger.info(f"DB에서 {days}일간의 장바구니 데이터를 가져옵니다.")
+            query = """
+                SELECT 
+                    CAST(c.member_id AS UNSIGNED) as member_id,
+                    CAST(c.product_id AS UNSIGNED) as product_id,
+                    c.created_at
+                FROM action_log c
+                WHERE c.event_name = 'CartItemPutEvent'
+                AND c.created_at >= DATE_SUB(NOW(), INTERVAL :days DAY)
+                AND c.member_id IS NOT NULL
+                AND c.product_id IS NOT NULL
+                ORDER BY c.created_at DESC
+            """
+
+            with self.db.get_connection() as conn:
+                start_time = datetime.now()
+                df = pd.read_sql(text(query), conn, params={'days': days})
+                end_time = datetime.now()
+                query_time = (end_time - start_time).total_seconds()
+                self.logger.info(f"DB 쿼리 완료. 소요 시간: {query_time:.2f}초")
+                
+                df['member_id'] = pd.to_numeric(df['member_id'], errors='coerce').astype('Int64')
+                df['product_id'] = pd.to_numeric(df['product_id'], errors='coerce').astype('Int64')
+                df = df.dropna(subset=['member_id', 'product_id'])
+                
+                # 데이터 통계 로깅
+                self.logger.info(f"총 {len(df)}개의 장바구니 데이터 로드 완료")
+                self.logger.info(f"고유 사용자 수: {df['member_id'].nunique()}")
+                self.logger.info(f"고유 상품 수: {df['product_id'].nunique()}")
+                
+                # 캐시 파일 저장
+                try:
+                    df.to_csv(cache_file, index=False)
+                    self.logger.info(f"장바구니 데이터가 캐시 파일 {cache_file}에 저장되었습니다.")
+                except Exception as e:
+                    self.logger.warning(f"캐시 파일 저장 중 오류 발생: {str(e)}")
+                
+                return df
+                
+        except Exception as e:
+            self.logger.error(f"데이터베이스에서 장바구니 데이터 가져오기 실패: {str(e)}")
+            # 오류 발생 시 빈 DataFrame 반환
+            return pd.DataFrame(columns=['member_id', 'product_id', 'created_at']) 

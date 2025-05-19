@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from database.recommendation_db import RecommendationDB
 from model_als.pyspark_als import PySparkALS
-from utils.logger import setup_logger, overall_log
+from utils.logger import setup_logger
 from utils.recommendation_utils import save_recommendations
 
 from sklearn.model_selection import train_test_split
@@ -170,19 +170,6 @@ class RunALS:
             if self.split_test_data and self.enable_loss_calculation and self.test_data is not None:
                 test_result = self.calculate_loss(self.test_data, 'test')
             
-            # 결과 반환
-            result = {
-                "recommendations": recommendations_df,
-                "train_result": train_result,
-                "test_result": test_result
-            }
-
-            if train_result is not None:
-                self.logger.info(f"학습 데이터 결과:")
-                self.logger.info(f"- MAE: {train_result['mae']:.4f}")
-                self.logger.info(f"- RMSE: {train_result['rmse']:.4f}")
-                self.logger.info(f"- 샘플 수: {train_result['samples']}")
-            
             # 테스트 결과 정보 출력 (있는 경우)
             if test_result is not None:
                 self.logger.info(f"테스트 데이터 결과:")
@@ -190,9 +177,16 @@ class RunALS:
                 self.logger.info(f"- RMSE: {test_result['rmse']:.4f}")
                 self.logger.info(f"- 샘플 수: {test_result['samples']}")
             save_recommendations(recommendations_df, output_dir=output_dir_with_id)
-            # 전체 실행 로그 저장 - run_id 전달
-            overall_log(run_id, train_result, test_result, self.als_config)
             
+            # 결과 반환 (run_id와 config 추가)
+            result = {
+                "run_id": run_id,
+                "recommendations": recommendations_df,
+                "train_result": train_result,
+                "test_result": test_result,
+                "output_dir": output_dir_with_id,
+                "config": self.als_config
+            }
             return result
             
         except Exception as e:

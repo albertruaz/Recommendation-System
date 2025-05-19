@@ -51,41 +51,102 @@ def setup_logger(name='recommendation'):
     
     return logger
 
-def overall_log(run_id, train_result, test_result, als_config=None):
+def log_als_model_results(result):
     """
-    ALS 실행 결과를 JSON 형식으로 기록
+    모델 실행 결과를 로깅하는 함수
     
     Args:
-        run_id: 실행 ID (timestamp_uuid 형식)
+        run_id: 실행 ID
+        train_result: 학습 데이터 평가 결과 (ALS의 경우)
+        test_result: 테스트 데이터 평가 결과 (ALS의 경우)
+        model_config: 모델 설정 정보
+    """
+    run_id = result['run_id']
+    train_result = result['train_result']
+    test_result = result['test_result']
+    model_config = result['config']
+
+    model_type = "unknown"
+    if model_config and "model_type" in model_config:
+        model_type = model_config["model_type"]
+    
+    # 로깅 결과 저장
+    if train_result is not None and model_type == "pyspark_als":
+        log_train_test_metrics(train_result, test_result)
+    
+    # overall_log 함수 호출 (모든 모델 타입에 공통)
+    overall_log(run_id, train_result, test_result, model_config)
+
+def log_recent_product_model_results(result):
+    """
+    최근 본 상품 모델 실행 결과를 로깅하는 함수
+    """
+    pass
+
+def log_train_test_metrics(train_result, test_result):
+    """
+    학습 및 테스트 메트릭을 로깅하는 함수
+    
+    Args:
         train_result: 학습 데이터 평가 결과
         test_result: 테스트 데이터 평가 결과
-        als_config: ALS 설정 (None인 경우 파일에서 로드)
     """
+    logger = logging.getLogger("recommendation")
+    
+    # 학습 결과 정보 출력 (있는 경우)
+    if train_result is not None:
+        logger.info(f"학습 데이터 결과:")
+        logger.info(f"- MAE: {train_result['mae']:.4f}")
+        logger.info(f"- RMSE: {train_result['rmse']:.4f}")
+        logger.info(f"- 샘플 수: {train_result['samples']}")
+    
+    # 테스트 결과 정보 출력 (있는 경우)
+    if test_result is not None:
+        logger.info(f"테스트 데이터 결과:")
+        logger.info(f"- MAE: {test_result['mae']:.4f}")
+        logger.info(f"- RMSE: {test_result['rmse']:.4f}")
+        logger.info(f"- 샘플 수: {test_result['samples']}")
+
+def overall_log(run_id, train_result, test_result, model_config=None):
+    """
+    모델 실행 결과를 JSON 형식으로 기록
+    
+    Args:
+        run_id: 실행 ID (timestamp 형식)
+        train_result: 학습 데이터 평가 결과
+        test_result: 테스트 데이터 평가 결과
+        model_config: 모델 설정 정보
+    """
+    # 모델 타입 확인 (기본값: als)
+    model_type = "als"
+    if model_config and "model_type" in model_config:
+        model_type = model_config["model_type"]
+    
     # 로그 파일 경로
     log_dir = 'logs'
     os.makedirs(log_dir, exist_ok=True)
-    config_log_file = os.path.join(log_dir, 'overall_als_config.log')
-    result_log_file = os.path.join(log_dir, 'overall_als_result.log')
+    config_log_file = os.path.join(log_dir, f'overall_{model_type}_config.log')
+    result_log_file = os.path.join(log_dir, f'overall_{model_type}_result.log')
     
-    # ALS 설정 불러오기 (전달받지 않은 경우)
-    if als_config is None:
-        config_path = 'config/als_config.json'
+    # 모델 설정 불러오기 (전달받지 않은 경우)
+    if model_config is None:
+        config_path = f'config/{model_type}_config.json'
         try:
             with open(config_path, 'r') as f:
-                als_config = json.load(f)
+                model_config = json.load(f)
         except Exception as e:
-            als_config = {"error": f"설정 파일 로드 실패: {str(e)}"}
+            model_config = {"error": f"설정 파일 로드 실패: {str(e)}"}
     
     # 로그 데이터 구성 - 설정 로그
     config_log_data = {
         "name": run_id,
-        "als_config": als_config
+        "model_config": model_config
     }
     
     # 로그 데이터 구성 - 결과 로그
     result_log_data = {
         "name": run_id,
-        "check": train_result is not None,  # 학습 결과가 있으면 성공으로 간주
+        "check": train_result is not None if train_result is not None else True,  # 결과가 없으면 성공으로 간주
         "train_result": train_result,
         "test_result": test_result
     }
