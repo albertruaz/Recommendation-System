@@ -7,18 +7,18 @@
 
 import pandas as pd
 from typing import Optional
-from .db_connector import DBConnector
 from sqlalchemy import text
 from utils.logger import setup_logger
 import os
 from datetime import datetime
+from .db_manager import DatabaseManager
 
 class RecommendationDB:
     """추천 시스템을 위한 데이터베이스 유틸리티 클래스"""
     
     def __init__(self):
         """데이터베이스 연결 초기화"""
-        self.db = DBConnector()
+        self.db_manager = DatabaseManager()
         self.logger = setup_logger('db')
         # 캐시 디렉토리 설정
         self.cache_dir = "cache/interactions"
@@ -157,7 +157,7 @@ class RecommendationDB:
                     FIELD(interaction_type, 'purchase', 'cart', 'like', 'view2', 'view1', 'impression2', 'impression1')
             """
 
-            with self.db.get_connection() as conn:
+            with self.db_manager.mysql.get_connection() as conn:
                 start_time = datetime.now()
                 df = pd.read_sql(text(query), conn, params={'days': days})
                 end_time = datetime.now()
@@ -236,7 +236,7 @@ class RecommendationDB:
                 ORDER BY c.created_at DESC
             """
 
-            with self.db.get_connection() as conn:
+            with self.db_manager.mysql.get_connection() as conn:
                 start_time = datetime.now()
                 df = pd.read_sql(text(query), conn, params={'days': days})
                 end_time = datetime.now()

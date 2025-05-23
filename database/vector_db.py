@@ -4,11 +4,10 @@ Vector Database 관리 모듈
 상품 임베딩 벡터 및 벡터 검색 기능을 제공합니다.
 """
 
-import os
 import numpy as np
 import pandas as pd
 from typing import List, Dict, Union, Optional
-from .vector_db_connector import VectorDBConnector
+from .db_manager import DatabaseManager
 
 class VectorDB:
     def __init__(self):
@@ -16,7 +15,7 @@ class VectorDB:
         Vector Database 초기화
         """
         # PostgreSQL 기반 Vector DB 연결
-        self.connector = VectorDBConnector()
+        self.db_manager = DatabaseManager()
         
     def get_product_vectors(self, product_ids: List[int]) -> Dict[int, np.ndarray]:
         """
@@ -29,7 +28,7 @@ class VectorDB:
             상품 ID를 키로, 벡터를 값으로 하는 딕셔너리
         """
         # PostgreSQL에서 벡터 데이터 가져오기
-        return self.connector.get_product_vectors(product_ids)
+        return self.db_manager.postgres.get_product_vectors(product_ids)
     
     def search_similar_products(self, query_vector: np.ndarray, top_n: int = 100, exclude_ids: List[int] = None) -> pd.DataFrame:
         """
@@ -45,7 +44,7 @@ class VectorDB:
         """
         try:
             # PostgreSQL에서 유사 상품 검색
-            similar_products = self.connector.search_by_vector(
+            similar_products = self.db_manager.postgres.search_by_vector(
                 query_vector=query_vector, 
                 top_k=top_n,
                 exclude_ids=exclude_ids
@@ -78,7 +77,7 @@ class VectorDB:
         """
         try:
             # PostgreSQL에서 유사 상품 검색
-            similar_products = self.connector.get_similar_products_by_id(
+            similar_products = self.db_manager.postgres.get_similar_products_by_id(
                 product_id=product_id,
                 top_k=top_n
             )

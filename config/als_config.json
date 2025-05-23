@@ -1,29 +1,31 @@
 {
   "model_type": "pyspark_als",
   "pyspark_als": {
-    "max_iter": 15,
+    "max_iter": 10,
     "reg_param": 0.1,
     "rank": 10,
+    "nonnegative": false,
+    "cold_start_strategy": "nan",
     "interaction_weights": {
-      "impression1": 1.0,
-      "impression2": 0.5,
-      "view1": 5.0,
-      "view2": 7.0,
-      "like": 10.0,
-      "cart": 15.0,
-      "purchase": 20.0,
-      "review": 20.0
+      "impression1": -1,
+      "impression2": -2,
+      "view1": 2.0,
+      "view2": 4.0,
+      "like": 5.0,
+      "cart": 7.0,
+      "purchase": 10.0,
+      "review": 10.0
     }
   },
   "default_params": {
     "days": 30,
-    "top_n": 100,
+    "top_n": 10,
     "output_dir": "output",
     "verbose": false
   },
   "testing": {
     "split_test_data": true,
-    "test_ratio": 0.2,
+    "test_ratio": 0.1,
     "random_seed": 42,
     "calculate_loss": true
   }

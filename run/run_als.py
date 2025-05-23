@@ -16,13 +16,16 @@ from utils.recommendation_utils import save_recommendations
 from sklearn.model_selection import train_test_split
 
 class RunALS:
-    def __init__(self):
+    def __init__(self, run_id=None):
         # 설정 파일 로드
         with open('config/als_config.json', 'r') as f:
             self.als_config = json.load(f)
         
         # 로거 설정
         self.logger = setup_logger('run_als')
+        
+        # 실행 ID 설정
+        self.run_id = run_id
         
         # 기본 설정 로드
         self.days = self.als_config['default_params']['days']
@@ -41,6 +44,8 @@ class RunALS:
         self.reg_param = model_params['reg_param']
         self.rank = model_params['rank']
         self.interaction_weights = model_params['interaction_weights']
+        self.nonnegative = model_params.get('nonnegative', True)
+        self.cold_start_strategy = model_params.get('cold_start_strategy', 'nan')
         
         self.model = None
         self.test_data = None
@@ -100,23 +105,12 @@ class RunALS:
             mae = np.mean(np.abs(actual - pred))
             rmse = np.sqrt(np.mean(np.square(actual - pred)))
             
-            result_path = None
-            if data_type == 'test':
-                os.makedirs(self.output_dir, exist_ok=True)
-                result_path = os.path.join(self.output_dir, f'{data_type}_predictions_{self.days}days.csv')
-                result_df.to_csv(result_path, index=False)
-                self.logger.info(f"{data_type.capitalize()} 예측 결과가 {result_path}에 저장되었습니다.")
-            
             result = {
                 "mae": float(mae),
                 "rmse": float(rmse),
                 "samples": len(valid_predictions)
             }
-            
-            if result_path:
-                result["results_path"] = result_path
-                
-            return result
+            return result_df, result
             
         except Exception as e:
             self.logger.error(f"{data_type.capitalize()} 손실 계산 중 오류 발생: {str(e)}")
@@ -127,10 +121,13 @@ class RunALS:
         self.logger.info(f"Start ALS")
         
         try:
-            # 실행 ID 생성 (현재 날짜/시간 + UUID)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            unique_id = str(uuid.uuid4())[:8]  # UUID의 첫 8자만 사용
-            run_id = f"{timestamp}_{unique_id}"
+            # 실행 ID 사용 (없는 경우 자동 생성)
+            if self.run_id is None:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                unique_id = str(uuid.uuid4())[:8]  # UUID의 첫 8자만 사용
+                self.run_id = f"{timestamp}_{unique_id}"
+                
+            self.logger.info(f"실행 ID: {self.run_id}")
             
             # 상호작용 데이터 로드
             interactions_df = self.load_interactions()
@@ -146,41 +143,43 @@ class RunALS:
                 interaction_weights=self.interaction_weights,
                 max_prediction=50.0,
                 huber_delta=10.0,
-                split_test_data=self.split_test_data
+                split_test_data=self.split_test_data,
+                nonnegative=self.nonnegative,
+                cold_start_strategy=self.cold_start_strategy
             )
             
             # 전체 데이터로 인덱스 구성, 학습 데이터만 사용하여 학습
-            matrix_data = self.model.prepare_matrices(interactions_df, train_df=train_df)
+            prepare_df = self.model.prepare_df(interactions_df, train_df=train_df)
             
             # 모델 학습
             self.logger.info("모델 학습 시작")
-            self.model.train(matrix_data=matrix_data)
+            self.model.train(prepare_df=prepare_df)
             
             # 추천 생성
             recommendations_df = self.model.generate_recommendations(top_n=self.top_n)
             
             # 파일 이름에 run_id 추가
-            output_dir_with_id = os.path.join(self.output_dir, run_id)
+            output_dir_with_id = os.path.join(self.output_dir, self.run_id)
             os.makedirs(output_dir_with_id, exist_ok=True)
             
+            user_factors_df, item_factors_df = self.model.get_latent_factors()
+
             train_result = None
             test_result = None
             if self.enable_loss_calculation:
-                train_result = self.calculate_loss(train_df, 'train')
+                train_df, train_result = self.calculate_loss(train_df, 'train')
             if self.split_test_data and self.enable_loss_calculation and self.test_data is not None:
-                test_result = self.calculate_loss(self.test_data, 'test')
+                test_df, test_result = self.calculate_loss(self.test_data, 'test')
+                save_recommendations(test_df, output_dir=output_dir_with_id, file_name='als_4_test_result')
             
-            # 테스트 결과 정보 출력 (있는 경우)
-            if test_result is not None:
-                self.logger.info(f"테스트 데이터 결과:")
-                self.logger.info(f"- MAE: {test_result['mae']:.4f}")
-                self.logger.info(f"- RMSE: {test_result['rmse']:.4f}")
-                self.logger.info(f"- 샘플 수: {test_result['samples']}")
-            save_recommendations(recommendations_df, output_dir=output_dir_with_id)
             
-            # 결과 반환 (run_id와 config 추가)
+            save_recommendations(user_factors_df, output_dir=output_dir_with_id, file_name='als_1_user_factors')
+            save_recommendations(item_factors_df, output_dir=output_dir_with_id, file_name='als_2_item_factors')
+            save_recommendations(train_df, output_dir=output_dir_with_id, file_name='als_3_train_result')
+            save_recommendations(recommendations_df, output_dir=output_dir_with_id, file_name='als_5_recommendations')
+            
             result = {
-                "run_id": run_id,
+                "run_id": self.run_id,
                 "recommendations": recommendations_df,
                 "train_result": train_result,
                 "test_result": test_result,

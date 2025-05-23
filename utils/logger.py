@@ -60,8 +60,10 @@ def log_als_model_results(result):
         train_result: 학습 데이터 평가 결과 (ALS의 경우)
         test_result: 테스트 데이터 평가 결과 (ALS의 경우)
         model_config: 모델 설정 정보
+
     """
     run_id = result['run_id']
+    recommendations = result['recommendations']
     train_result = result['train_result']
     test_result = result['test_result']
     model_config = result['config']

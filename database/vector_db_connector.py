@@ -74,34 +74,6 @@ class VectorDBConnector:
         self.engine = None
         VectorDBConnector._instance = None
 
-    def create_vector_table(self, dimension: int = 1024):
-        """
-        PGVector 확장 활성화 및 product_embedding 테이블 생성
-        """
-        session = self.Session()
-        try:
-            # 1) PGVector 확장 설치
-            session.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-            session.commit()
-
-            # 2) 테이블 생성
-            create_table_sql = f"""
-            CREATE TABLE IF NOT EXISTS product (
-                id                  BIGINT         PRIMARY KEY,
-                status              VARCHAR(255),
-                primary_category_id BIGINT,
-                secondary_category_id BIGINT,
-                image_vector        VECTOR(1024)
-            );
-            """
-            session.execute(text(create_table_sql))
-            session.commit()
-        except Exception as e:
-            session.rollback()
-            raise e
-        finally:
-            session.close()
-    
     def fetch_product_ids(self):
         """
         product_embedding 테이블에서 모든 product_id를 가져오는 함수

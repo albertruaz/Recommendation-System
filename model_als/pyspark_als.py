@@ -32,7 +32,9 @@ class PySparkALS(BaseALS):
                  interaction_weights: dict = None,
                  max_prediction: float = 50.0,
                  huber_delta: float = 10.0,
-                 split_test_data: bool = False):
+                 split_test_data: bool = False,
+                 nonnegative: bool = True,
+                 cold_start_strategy: str = "nan"):
         super().__init__(max_iter, reg_param, rank, random_state)
         self.interaction_weights = interaction_weights or {
             "impression1": 1.0,
@@ -51,6 +53,8 @@ class PySparkALS(BaseALS):
         self.huber_delta = huber_delta  # Huber Loss의 델타값
         self.split_test_data = split_test_data  # 테스트 데이터 분할 여부
         self._session_created_internally = False  # 세션이 내부에서 생성되었는지 추적
+        self.nonnegative = nonnegative  # 음수 예측 방지 여부
+        self.cold_start_strategy = cold_start_strategy  # cold start 처리 방식
     
     def _create_spark_session(self):
         """필요한 설정으로 SparkSession을 생성합니다"""
@@ -62,7 +66,7 @@ class PySparkALS(BaseALS):
         
         return self.spark
     
-    def prepare_matrices(self, interactions_df: pd.DataFrame, train_df=None, max_sample_size=300000, split_strategy='random'):
+    def prepare_df(self, interactions_df: pd.DataFrame, train_df=None, max_sample_size=300000, split_strategy='random'):
         """
         상호작용 데이터를 PySpark DataFrame으로 변환하고 훈련/테스트 데이터로 분할
         
@@ -78,22 +82,22 @@ class PySparkALS(BaseALS):
         # 1) 인덱스 매핑 (항상 전체 데이터에 대해 인덱스 생성)
         self._prepare_indices(interactions_df)
         
+        # 사용할 데이터 선택
         if train_df is not None:
-            interactions_df = train_df
+            interactions_df = train_df.copy()
         
+        # rating 컬럼 보장
         if 'rating' not in interactions_df.columns:
             interactions_df['rating'] = interactions_df['interaction_type'].map(self.interaction_weights)
-        filtered = interactions_df[interactions_df['rating'] > 0].copy()
-
-        # 데이터 양이 너무 많은 경우 샘플링
-        # if len(filtered) > max_sample_size:
-        #     self.logger.info(f"데이터가 너무 많아 샘플링합니다: {len(filtered)}개 → {max_sample_size}개")
-        #     filtered = filtered.sample(n=max_sample_size, random_state=self.random_state)
         
-        self.filtered_interactions_df = filtered
+        # 2) 매핑된 인덱스 컬럼 추가
+        interactions_df['user_idx'] = interactions_df['member_id'].map(self.user2idx)
+        interactions_df['item_idx'] = interactions_df['product_id'].map(self.item2idx)
         
-        # 4) Spark DataFrame 생성 - 필요한 열만 선택하여 메모리 사용량 줄임
-        als_data = filtered[['member_id','product_id','rating']]
+        # 3) Spark DataFrame 생성 - user_idx/item_idx와 rating만 사용
+        als_data = interactions_df[['user_idx', 'item_idx', 'rating']]
+        
+        self.logger.info("Spark DataFrame 생성 중...")
         
         # SparkSession 생성이 필요한 경우만 생성 (외부에서 이미 생성된 경우 건너뜀)
         if self.spark is None:
@@ -101,7 +105,6 @@ class PySparkALS(BaseALS):
         
         try:
             # 한 번에 Spark DataFrame 생성 (PySpark가 내부적으로 적절히 분할함)
-            self.logger.info("Spark DataFrame 생성 중...")
             ratings_df = self.spark.createDataFrame(als_data)
             max_partitions = 2  # 최대 파티션 수 제한
             ratings_df = ratings_df.repartition(max_partitions)
@@ -116,12 +119,12 @@ class PySparkALS(BaseALS):
                     pass
             raise
     
-    def train(self, matrix_data) -> None:
+    def train(self, prepare_df) -> None:
         """
         PySpark ALS 모델 학습
         
         Args:
-            matrix_data: Spark DataFrame 형태의 학습 데이터
+            prepare_df: Spark DataFrame 형태의 학습 데이터
         """
         try:
             # 세션 상태 확인
@@ -132,17 +135,17 @@ class PySparkALS(BaseALS):
             self.logger.info(f"\n=== PySpark ALS 학습 시작 ===")
             self.logger.info(f"파라미터: max_iter={self.max_iter}, reg_param={self.reg_param}, rank={self.rank}")
             
-            # ALS 모델 설정
+            # ALS 모델 설정 - 매핑된 인덱스 컬럼 사용
             als = ALS(
                 maxIter=self.max_iter,
                 regParam=self.reg_param,
                 rank=self.rank,
-                userCol="member_id",
-                itemCol="product_id",
+                userCol="user_idx",  # 변경: 매핑된 인덱스 컬럼 사용
+                itemCol="item_idx",  # 변경: 매핑된 인덱스 컬럼 사용
                 ratingCol="rating",
                 implicitPrefs=False,    # Explicit 모드
-                nonnegative=True,       # 음수 예측 방지
-                coldStartStrategy="nan", # 'drop' 대신 'nan'을 사용하여 완전히 빈 예측 방지
+                nonnegative=self.nonnegative,
+                coldStartStrategy=self.cold_start_strategy,
                 seed=self.random_state,
                 # 메모리 관리를 위한 체크포인팅 활성화 (높은 rank와 iter에서 중요)
                 intermediateStorageLevel="MEMORY_AND_DISK",
@@ -160,8 +163,8 @@ class PySparkALS(BaseALS):
                 self.logger.info(f"높은 rank({self.rank}) 또는 iter({self.max_iter}) 감지: 체크포인트 활성화 ({checkpoint_dir})")
                 self.spark.sparkContext.setCheckpointDir(checkpoint_dir)
             
-            # matrix_data로 직접 학습
-            self.model = als.fit(matrix_data)
+            # prepare_df 직접 학습
+            self.model = als.fit(prepare_df)
             train_time = time.time() - start_time
             self.logger.info(f"학습 완료 (소요 시간: {safe_format(train_time, '{:.2f}')}초)")
             gc.collect()
@@ -192,89 +195,53 @@ class PySparkALS(BaseALS):
             try:
                 # 최대 안전 샘플 수를 환경 변수나 설정 파일에서 가져오기
                 import os
-                import json
+                max_safe_samples = int(os.environ.get('MAX_SAFE_SAMPLES', 100000))
                 
-                # 환경 변수에서 max_safe_count 가져오기
-                max_safe_count = int(os.environ.get('SPARK_MAX_SAFE_COUNT', 100000))
+                # Pandas로 변환
+                # 자동 파티션 감지 또는 SparkSession 설정에서 가져온 값 사용
+                pdf_user_factors = user_factors_df.toPandas()
+                pdf_item_factors = item_factors_df.toPandas()
                 
-                # 설정 파일이 있으면 해당 파일에서 값 읽기
-                try:
-                    if os.path.exists('config/tuning_config.json'):
-                        with open('config/tuning_config.json', 'r') as f:
-                            config = json.load(f)
-                        max_safe_count = config.get('pyspark_als', {}).get('max_safe_count', max_safe_count)
-                except Exception as e:
-                    self.logger.debug(f"설정 파일 로드 중 오류 무시: {e}")
+                # user_id/item_id가 아닌 인덱스를 기준으로 사용
+                n_users = len(self.user2idx)
+                n_items = len(self.item2idx)
+                n_factors = self.rank
                 
-                # 높은 메모리 사용 위험 감지 및 경고
-                user_count = user_factors_df.count()
-                item_count = item_factors_df.count()
-                memory_estimate = (user_count + item_count) * self.rank * 4 / 1024 / 1024  # MB 단위 대략적 메모리 사용량
+                # 사용자와 상품 요인을 저장할 배열 초기화
+                self.user_factors = np.zeros((n_users, n_factors))
+                self.item_factors = np.zeros((n_items, n_factors))
                 
-                if memory_estimate > 500:  # 500MB 이상이면 경고
-                    self.logger.warning(f"잠재 요인 변환에 예상되는 메모리: ~{safe_format(memory_estimate, '{:.1f}')}MB (사용자: {user_count}, 상품: {item_count}, rank: {self.rank})")
+                # 요인 저장 (인덱스 기준)
+                for _, row in pdf_user_factors.iterrows():
+                    idx = int(row['id'])  # 이미 user_idx가 저장되어 있음
+                    if 0 <= idx < n_users:  # 인덱스 범위 검사
+                        self.user_factors[idx] = np.array(row['features'])
                 
-                # 메모리가 너무 많이 필요한 경우 샘플링 고려
-                if user_count > max_safe_count or item_count > max_safe_count:
-                    self.logger.warning(f"과도한 잠재 요인 수 감지, 샘플링 사용")
-                    if user_count > max_safe_count:
-                        frac = max_safe_count / user_count
-                        user_factors_df = user_factors_df.sample(False, frac, seed=42)
-                    if item_count > max_safe_count:
-                        frac = max_safe_count / item_count
-                        item_factors_df = item_factors_df.sample(False, frac, seed=42)
+                for _, row in pdf_item_factors.iterrows():
+                    idx = int(row['id'])  # 이미 item_idx가 저장되어 있음
+                    if 0 <= idx < n_items:  # 인덱스 범위 검사
+                        self.item_factors[idx] = np.array(row['features'])
                 
-                # pandas로 변환 (성능 평가에만 사용되므로 메모리에 로드)
-                user_factors_pd = user_factors_df.toPandas()
-                item_factors_pd = item_factors_df.toPandas()
+                # 정리: 캐시 해제 및 관련 변수 제거
+                user_factors_df.unpersist()
+                item_factors_df.unpersist()
+                del pdf_user_factors
+                del pdf_item_factors
+                gc.collect()
                 
-                # NumPy 배열 초기화
-                self.user_factors = np.zeros((len(self.user2idx), self.rank))
-                self.item_factors = np.zeros((len(self.item2idx), self.rank))
-                
-                # 사용자 요인 설정
-                for _, row in user_factors_pd.iterrows():
-                    user_id = row['id']
-                    if user_id in self.idx2user:
-                        original_user_id = self.idx2user[user_id]
-                        if original_user_id in self.user2idx:
-                            user_idx = self.user2idx[original_user_id]
-                            self.user_factors[user_idx] = np.array(row['features'])
-                
-                # 아이템 요인 설정
-                for _, row in item_factors_pd.iterrows():
-                    item_id = row['id']
-                    if item_id in self.idx2item:
-                        original_item_id = self.idx2item[item_id]
-                        if original_item_id in self.item2idx:
-                            item_idx = self.item2idx[original_item_id]
-                            self.item_factors[item_idx] = np.array(row['features'])
-                
-                self.logger.info(f"잠재 요인 변환 완료: 사용자({self.user_factors.shape}), 상품({self.item_factors.shape})")
-                
-                # 메모리 정리
-                del user_factors_pd, item_factors_pd
+                self.logger.info(f"잠재 요인 추출 완료: 사용자({n_users}), 상품({n_items}), 요인({n_factors})")
                 
             except Exception as e:
-                self.logger.error(f"잠재 요인 변환 중 오류: {str(e)}")
-                # 변환 실패 시에도 빈 배열만 설정하고 계속 진행
-                if hasattr(self, 'user2idx') and hasattr(self, 'item2idx'):
-                    self.user_factors = np.zeros((len(self.user2idx), self.rank))
-                    self.item_factors = np.zeros((len(self.item2idx), self.rank))
-            
-            # 캐시 해제
-            user_factors_df.unpersist(blocking=True)
-            item_factors_df.unpersist(blocking=True)
-            
-            # 메모리 정리
-            gc.collect()
-            
+                self.logger.error(f"잠재 요인 추출 중 오류: {str(e)}")
+                # 오류 발생 시 기본 차원으로 요인 초기화 (추천이라도 할 수 있게)
+                n_users = len(self.user2idx)
+                n_items = len(self.item2idx)
+                self.user_factors = np.zeros((n_users, self.rank))
+                self.item_factors = np.zeros((n_items, self.rank))
+                raise
         except Exception as e:
-            # 요인 추출 실패 시 기본 요인 설정 후 경고만 표시하고 진행
-            self.logger.error(f"잠재 요인 추출 실패: {str(e)}")
-            if hasattr(self, 'user2idx') and hasattr(self, 'item2idx'):
-                self.user_factors = np.zeros((len(self.user2idx), self.rank))
-                self.item_factors = np.zeros((len(self.item2idx), self.rank))
+            self.logger.error(f"잠재 요인 추출 전체 오류: {str(e)}")
+            raise
     
     def transform(self, test_data):
         """
@@ -323,7 +290,50 @@ class PySparkALS(BaseALS):
         n_users = len(unique_users)
         n_items = len(unique_items)
         self.logger.info(f"총 사용자 수: {n_users}, 총 상품 수: {n_items}")
+    
+    def generate_recommendations(self, top_n: int = 300) -> pd.DataFrame:
+        """전체 사용자에 대한 추천 생성
         
+        Args:
+            top_n (int): 각 사용자당 추천할 상품 수
+            
+        Returns:
+            pd.DataFrame: 추천 결과 데이터프레임
+        """
+        if self.user_factors is None or self.item_factors is None:
+            raise Exception("모델이 학습되지 않았습니다. train() 메서드를 먼저 실행하세요.")
+        
+        try:
+            self.logger.info(f"전체 사용자에 대한 추천 생성 시작 (top_n={top_n})")
+            results = []
+            
+            # 각 사용자에 대해 추천 생성
+            for (user_idx, user_id) in self.idx2user.items():
+            
+                # 예측 점수 계산 (내적)
+                scores = np.dot(self.user_factors[user_idx], self.item_factors.T)
+                
+                # 상위 N개 아이템 선택
+                top_item_indices = np.argsort(-scores)[:top_n]
+                top_scores = scores[top_item_indices]
+                
+                # 결과 저장
+                user_results = pd.DataFrame({
+                    'member_id': user_id,
+                    'product_id': [self.idx2item[idx] for idx in top_item_indices],
+                    'predicted_rating': top_scores
+                })
+                results.append(user_results)
+            
+            # 모든 결과 합치기
+            recommendations_df = pd.concat(results, ignore_index=True)
+            self.logger.info(f"추천 생성 완료: {len(recommendations_df)}개의 추천")
+            return recommendations_df
+            
+        except Exception as e:
+            self.logger.error(f"추천 생성 오류: {str(e)}")
+            raise
+
     def cleanup(self) -> None:
         """리소스 정리"""
         try:
@@ -372,9 +382,18 @@ class PySparkALS(BaseALS):
             if 'rating' not in test_df.columns and 'interaction_type' in test_df.columns:
                 test_df['rating'] = test_df['interaction_type'].map(self.interaction_weights)
             
-            # Spark DataFrame으로 변환
+            # 인덱스 매핑 추가
+            test_df['user_idx'] = test_df['member_id'].map(self.user2idx)
+            test_df['item_idx'] = test_df['product_id'].map(self.item2idx)
+            
+            # 매핑 실패한 행 필터링
+            valid_test = test_df.dropna(subset=['user_idx', 'item_idx']).copy()
+            if len(valid_test) < len(test_df):
+                self.logger.warning(f"{len(test_df) - len(valid_test)}개의 행이 매핑 실패로 제외됨")
+            
+            # Spark DataFrame으로 변환 - 매핑된 인덱스 사용
             test_spark_df = self.spark.createDataFrame(
-                test_df[['member_id', 'product_id', 'rating']]
+                valid_test[['user_idx', 'item_idx', 'rating']]
             )
             
             # 예측 생성
@@ -382,11 +401,14 @@ class PySparkALS(BaseALS):
             
             # 결과를 pandas DataFrame으로 변환
             result_df = predictions.select(
-                'member_id', 'product_id', 'rating', 'prediction'
+                'user_idx', 'item_idx', 'rating', 'prediction'
             ).toPandas()
             
+            # 인덱스를 원래 ID로 변환
+            result_df['member_id'] = result_df['user_idx'].map(self.idx2user)
+            result_df['product_id'] = result_df['item_idx'].map(self.idx2item)
+            
             # 원본 데이터와 병합
-            # 'prediction' 열만 유지하면서 원본 테스트 데이터프레임과 병합
             merged_df = pd.merge(
                 test_df,
                 result_df[['member_id', 'product_id', 'prediction']],
@@ -401,4 +423,51 @@ class PySparkALS(BaseALS):
         except Exception as e:
             self.logger.error(f"테스트 중 오류 발생: {str(e)}")
             # 오류 발생 시 원본 데이터 반환
-            return test_df 
+            return test_df
+
+    def get_latent_factors(self):
+        """
+        학습된 모델의 사용자 및 아이템 잠재 요인을 반환합니다.
+        
+        Returns:
+            tuple: (user_factors_df, item_factors_df) - 사용자 및 아이템 요인을 담은 DataFrame 튜플
+        """
+        if self.model is None:
+            raise ValueError("모델이 학습되지 않았습니다. train()을 먼저 호출하세요.")
+            
+        self.logger.info("잠재 요인 추출 중...")
+        
+        try:
+            # 모델에서 사용자 및 아이템 요인 가져오기 (인덱스 기반)
+            user_factors_df = self.model.userFactors.select("id", "features").toPandas()
+            item_factors_df = self.model.itemFactors.select("id", "features").toPandas()
+            
+            # 인덱스를 원래 ID로 변환
+            user_factors_df['member_id'] = user_factors_df['id'].apply(
+                lambda x: self.idx2user.get(int(x)) if x in self.idx2user else None
+            )
+            item_factors_df['product_id'] = item_factors_df['id'].apply(
+                lambda x: self.idx2item.get(int(x)) if x in self.idx2item else None
+            )
+            
+            # 필요없는 열 제거
+            user_factors_df = user_factors_df.drop(columns=['id']).dropna(subset=['member_id'])
+            item_factors_df = item_factors_df.drop(columns=['id']).dropna(subset=['product_id'])
+            
+            # features 열의 벡터를 풀어서 개별 컬럼으로 변환
+            for i in range(self.rank):
+                user_factors_df[f'factor_{i}'] = user_factors_df['features'].apply(lambda x: x[i] if len(x) > i else None)
+                item_factors_df[f'factor_{i}'] = item_factors_df['features'].apply(lambda x: x[i] if len(x) > i else None)
+            
+            # features 열 제거
+            user_factors_df = user_factors_df.drop(columns=['features'])
+            item_factors_df = item_factors_df.drop(columns=['features'])
+            
+            self.logger.info(f"잠재 요인 추출 완료: 사용자({len(user_factors_df)}명), 상품({len(item_factors_df)}개)")
+            
+            return user_factors_df, item_factors_df
+            
+        except Exception as e:
+            self.logger.error(f"잠재 요인 추출 중 오류 발생: {str(e)}")
+            # 오류 발생 시 빈 DataFrame 반환
+            return pd.DataFrame(columns=['member_id']), pd.DataFrame(columns=['product_id']) 
