@@ -114,55 +114,46 @@ class RunSimilars:
             사용자별 추천 상품 DataFrame (member_id, product_id, score 컬럼 포함)
         """
         try:
-            # 1. 사용자별 최근 장바구니 상품 데이터 가져오기
-            cart_items_df = self.db.get_recent_cart_items(days=days)
-            
-            save_recommendations(cart_items_df, output_dir=self.output_dir_with_id, file_name="check_cart_items_df")
+            # 1. 사용자별 최근 장바구니 상품 데이터 가져오기 (최소 상호작용 수 조건 포함, 최대 상품 수 제한 포함)
+            cart_items_df = self.db.get_recent_cart_items(
+                days=days, 
+                min_interactions=self.min_interactions,
+                max_cart_items=self.max_cart_items
+            )
+            if cart_items_df.empty:
+                self.logger.warning(f"최근 {days}일간 구매 데이터가 없거나 조건을 만족하는 사용자가 없습니다.")
+                return pd.DataFrame(columns=['member_id', 'product_id', 'score'])
 
+            user_cart_df = (
+                cart_items_df
+                .groupby(['member_id', 'product_id', 'primary_category_id', 'secondary_category_id'])['styles_id']
+                .agg(lambda x: list(dict.fromkeys(x)))  # 중복 제거 및 순서 유지
+                .reset_index()
+            )
             
-            user_cart_items = {}
-            for _, row in cart_items_df.iterrows():
-                member_id = row['member_id']
-                product_id = row['product_id']
-                
-                if member_id not in user_cart_items:
-                    user_cart_items[member_id] = []
-                    
-                if product_id not in user_cart_items[member_id]:
-                    user_cart_items[member_id].append(product_id)
-            
+            # 저장 객체 이름에 설정 정보를 포함
+            save_recommendations(user_cart_df, output_dir=self.output_dir_with_id, file_name="similars_1_cart_items")
+
             # 2. 추천 생성
             recommendations = []
-            
-            # 사용자별 처리
-            for member_id, cart_products in user_cart_items.items():
-                # 최소 상호작용 수보다 적은 상품을 가진 사용자는 건너뛰기
-                if len(cart_products) < self.min_interactions:
-                    self.logger.debug(f"사용자 {member_id}의 상호작용 수({len(cart_products)})가 최소 기준({self.min_interactions})보다 적습니다.")
-                    continue
-                    
-                # 최근 항목만 사용 (설정된 최대 개수까지)
-                cart_products = cart_products[:self.max_cart_items]
+            for member_id, group in user_cart_df.groupby('member_id'):
                 
-                # 상품 벡터 가져오기 - vector_db 사용
+                cart_products = group['product_id'].unique().tolist()
                 product_vectors = self.vector_db.get_product_vectors(cart_products)
                 if not product_vectors:
                     self.logger.debug(f"사용자 {member_id}의 장바구니 상품 벡터를 찾을 수 없습니다.")
                     continue
-                
-                # 평균 벡터 계산
+
                 avg_vector = self.compute_average_vector(product_vectors)
                 if avg_vector is None:
                     self.logger.debug(f"사용자 {member_id}의 평균 벡터 계산 실패")
                     continue
-                
-                # 유사 상품 검색 - vector_db 사용
+                    
                 similar_products = self.vector_db.search_by_vector(avg_vector, top_k=self.top_n, exclude_ids=cart_products)
                 if not similar_products:
                     self.logger.debug(f"사용자 {member_id}에 대한 유사 상품이 없습니다.")
                     continue
                 
-                # 유사도 임계값 적용하여 추천 결과 추가
                 for product_id, distance in similar_products:
                     score = 1.0 - distance  # 거리를 유사도 점수로 변환
                     if score >= self.similarity_threshold:
