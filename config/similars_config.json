@@ -11,6 +11,10 @@
     "min_interactions": 2,
     "max_cart_items": 20,
     "use_category_filter": true,
-    "include_similar_categories": false
+    "include_similar_categories": false,
+    "rec_by_style": true,
+    "rec_by_each": true,
+    "top_n_for_groups": 5,
+    "top_n_for_each": 3
   }
 }

@@ -45,6 +45,10 @@ class RunSimilars:
         self.max_cart_items = self.model_params.get('max_cart_items', 20)
         self.use_category_filter = self.model_params.get('use_category_filter', True)
         self.include_similar_categories = self.model_params.get('include_similar_categories', False)
+        self.rec_by_style = self.model_params.get('rec_by_style', False)
+        self.rec_by_each = self.model_params.get('rec_by_each', False)
+        self.top_n_for_groups = self.model_params.get('top_n_for_groups', 50)
+        self.top_n_for_each = self.model_params.get('top_n_for_each', 100)
         
         self.output_dir_with_id = None
         # DB 연결 초기화
@@ -111,7 +115,7 @@ class RunSimilars:
             days: 최근 몇 일 간의 장바구니 데이터를 사용할지 설정
             
         Returns:
-            사용자별 추천 상품 DataFrame (member_id, product_id, score 컬럼 포함)
+            사용자별 추천 상품 DataFrame (member_id, product_id, score, rec_type 컬럼 포함)
         """
         try:
             # 1. 사용자별 최근 장바구니 상품 데이터 가져오기 (최소 상호작용 수 조건 포함, 최대 상품 수 제한 포함)
@@ -122,7 +126,7 @@ class RunSimilars:
             )
             if cart_items_df.empty:
                 self.logger.warning(f"최근 {days}일간 구매 데이터가 없거나 조건을 만족하는 사용자가 없습니다.")
-                return pd.DataFrame(columns=['member_id', 'product_id', 'score'])
+                return pd.DataFrame(columns=['member_id', 'product_id', 'score', 'rec_type'])
 
             user_cart_df = (
                 cart_items_df
@@ -135,54 +139,125 @@ class RunSimilars:
             save_recommendations(user_cart_df, output_dir=self.output_dir_with_id, file_name="similars_1_cart_items")
 
             # 2. 추천 생성
-            recommendations = []
+            all_recommendations = []
+            
             for member_id, group in user_cart_df.groupby('member_id'):
-                
                 cart_products = group['product_id'].unique().tolist()
-                product_vectors = self.vector_db.get_product_vectors(cart_products)
-                if not product_vectors:
-                    self.logger.debug(f"사용자 {member_id}의 장바구니 상품 벡터를 찾을 수 없습니다.")
-                    continue
+                
+                # 스타일별 추천 생성
+                if self.rec_by_style:
+                    style_recommendations = self._generate_style_recommendations(member_id, group, cart_products)
+                    all_recommendations.extend(style_recommendations)
+                
+                # 사용자별 추천 생성
+                if self.rec_by_each:
+                    each_recommendations = self._generate_each_recommendations(member_id, group, cart_products)
+                    all_recommendations.extend(each_recommendations)
+            
+            if not all_recommendations:
+                return pd.DataFrame(columns=['member_id', 'product_id', 'score', 'rec_type'])
+                
+            recommendations_df = pd.DataFrame(all_recommendations)
 
-                avg_vector = self.compute_average_vector(product_vectors)
-                if avg_vector is None:
-                    self.logger.debug(f"사용자 {member_id}의 평균 벡터 계산 실패")
-                    continue
-                    
-                similar_products = self.vector_db.search_by_vector(avg_vector, top_k=self.top_n, exclude_ids=cart_products)
-                if not similar_products:
-                    self.logger.debug(f"사용자 {member_id}에 대한 유사 상품이 없습니다.")
-                    continue
-                
-                for product_id, distance in similar_products:
-                    score = 1.0 - distance  # 거리를 유사도 점수로 변환
-                    if score >= self.similarity_threshold:
-                        recommendations.append({
-                            'member_id': member_id,
-                            'product_id': product_id,
-                            'score': score
-                        })
-            
-            # 3. 결과 반환
-            if not recommendations:
-                return pd.DataFrame(columns=['member_id', 'product_id', 'score'])
-                
-            recommendations_df = pd.DataFrame(recommendations)
-            
-            # 상위 N개만 유지
+            # 3. 최종 추천 결과 생성 (각 타입별로 개수 제한)
             final_recommendations = []
-            for member_id, group in recommendations_df.groupby('member_id'):
-                top_recs = group.sort_values('score', ascending=False).head(self.top_n)
-                final_recommendations.append(top_recs)
             
-            if not final_recommendations:
-                return pd.DataFrame(columns=['member_id', 'product_id', 'score'])
-                
-            return pd.concat(final_recommendations, ignore_index=True)
+            for member_id, user_group in recommendations_df.groupby('member_id'):
+                for rec_type, type_group in user_group.groupby('rec_type'):
+                    if rec_type == 'style':
+                        top_recs = type_group.sort_values('score', ascending=False).head(self.top_n_for_groups)
+                    else:  # rec_type == 'each'
+                        top_recs = type_group.sort_values('score', ascending=False).head(self.top_n_for_each)
+                    final_recommendations.append(top_recs)
+            
+            if final_recommendations:
+                return pd.concat(final_recommendations, ignore_index=True)
+            else:
+                return pd.DataFrame(columns=['member_id', 'product_id', 'score', 'rec_type'])
             
         except Exception as e:
             self.logger.error(f"추천 생성 중 오류 발생: {str(e)}")
-            return pd.DataFrame(columns=['member_id', 'product_id', 'score'])
+            return pd.DataFrame(columns=['member_id', 'product_id', 'score', 'rec_type'])
+    
+    def _generate_style_recommendations(self, member_id: int, group: pd.DataFrame, cart_products: List[int]) -> List[Dict]:
+        """스타일별 추천 생성"""
+        recommendations = []
+        
+        # 스타일별로 그룹화하여 처리
+        style_groups = {}
+        for _, row in group.iterrows():
+            product_id = row['product_id']
+            styles_id = row['styles_id']
+            # styles_id를 집합으로 변환 (중복 제거 및 순서 무관하게)
+            if isinstance(styles_id, list):
+                style_key = tuple(sorted(set(styles_id)))  # 집합을 정렬된 튜플로 변환
+            else:
+                style_key = (styles_id,) if styles_id is not None else ()
+            
+            if style_key not in style_groups:
+                style_groups[style_key] = []
+            style_groups[style_key].append(product_id)
+        
+        # 각 스타일 그룹별로 추천 생성
+        for style_key, style_products in style_groups.items():
+            product_vectors = self.vector_db.get_product_vectors(style_products)
+            if not product_vectors:
+                self.logger.debug(f"사용자 {member_id}의 스타일 {style_key} 상품 벡터를 찾을 수 없습니다.")
+                continue
+
+            avg_vector = self.compute_average_vector(product_vectors)
+            if avg_vector is None:
+                self.logger.debug(f"사용자 {member_id}의 스타일 {style_key} 평균 벡터 계산 실패")
+                continue
+                
+            similar_products = self.vector_db.search_by_vector(avg_vector, top_k=self.top_n_for_groups, exclude_ids=cart_products)
+            if not similar_products:
+                self.logger.debug(f"사용자 {member_id}의 스타일 {style_key}에 대한 유사 상품이 없습니다.")
+                continue
+            
+            for product_id, distance in similar_products:
+                score = 1.0 - distance  # 거리를 유사도 점수로 변환
+                if score >= self.similarity_threshold:
+                    recommendations.append({
+                        'member_id': member_id,
+                        'product_id': product_id,
+                        'score': score,
+                        'rec_type': 'style'
+                    })
+        
+        return recommendations
+    
+    def _generate_each_recommendations(self, member_id: int, group: pd.DataFrame, cart_products: List[int]) -> List[Dict]:
+        """사용자별 추천 생성"""
+        recommendations = []
+        
+        # 기존 방식: 사용자별로 모든 상품의 평균 벡터 계산
+        product_vectors = self.vector_db.get_product_vectors(cart_products)
+        if not product_vectors:
+            self.logger.debug(f"사용자 {member_id}의 장바구니 상품 벡터를 찾을 수 없습니다.")
+            return recommendations
+
+        avg_vector = self.compute_average_vector(product_vectors)
+        if avg_vector is None:
+            self.logger.debug(f"사용자 {member_id}의 평균 벡터 계산 실패")
+            return recommendations
+            
+        similar_products = self.vector_db.search_by_vector(avg_vector, top_k=self.top_n_for_each, exclude_ids=cart_products)
+        if not similar_products:
+            self.logger.debug(f"사용자 {member_id}에 대한 유사 상품이 없습니다.")
+            return recommendations
+        
+        for product_id, distance in similar_products:
+            score = 1.0 - distance  # 거리를 유사도 점수로 변환
+            if score >= self.similarity_threshold:
+                recommendations.append({
+                    'member_id': member_id,
+                    'product_id': product_id,
+                    'score': score,
+                    'rec_type': 'each'
+                })
+        
+        return recommendations
     
     def run(self):
         """
@@ -205,11 +280,31 @@ class RunSimilars:
             output_dir_with_id = os.path.join(self.output_dir, self.run_id)
             os.makedirs(output_dir_with_id, exist_ok=True)
             self.output_dir_with_id = output_dir_with_id
+            
+            # 활성화된 추천 타입 로그
+            active_types = []
+            if self.rec_by_style:
+                active_types.append("스타일별")
+            if self.rec_by_each:
+                active_types.append("사용자별")
+            self.logger.info(f"활성화된 추천 타입: {', '.join(active_types) if active_types else '없음'}")
+            
             # 추천 생성 - 이제 모델 대신 직접 RunSimilars에서 구현된 메서드 호출
             self.logger.info(f"최근 {self.days}일간의 장바구니 데이터로 추천 생성 중...")
             recommendations_df = self.generate_user_recommendations(days=self.days)
             
             save_recommendations(recommendations_df, output_dir=output_dir_with_id, file_name="similars_1_recommendations")
+
+            # 추천 타입별 통계 계산
+            type_stats = {}
+            if not recommendations_df.empty:
+                for rec_type in recommendations_df['rec_type'].unique():
+                    type_df = recommendations_df[recommendations_df['rec_type'] == rec_type]
+                    type_stats[rec_type] = {
+                        'count': len(type_df),
+                        'users': type_df['member_id'].nunique(),
+                        'products': type_df['product_id'].nunique()
+                    }
 
             # 결과 반환 (run_id와 config 추가)
             result = {
@@ -218,6 +313,7 @@ class RunSimilars:
                 "user_count": recommendations_df['member_id'].nunique() if not recommendations_df.empty else 0,
                 "product_count": recommendations_df['product_id'].nunique() if not recommendations_df.empty else 0,
                 "total_recommendations": len(recommendations_df),
+                "type_stats": type_stats,
                 "output_dir": output_dir_with_id,
                 "config": self.similars_config
             }
@@ -243,6 +339,14 @@ if __name__ == "__main__":
             print(f"추천 결과: {result['total_recommendations']}개")
             print(f"추천 대상 사용자 수: {result['user_count']}명")
             print(f"추천된 상품 수: {result['product_count']}개")
+            
+            # 타입별 통계 출력
+            if 'type_stats' in result and result['type_stats']:
+                print("\n=== 추천 타입별 통계 ===")
+                for rec_type, stats in result['type_stats'].items():
+                    type_name = "스타일별" if rec_type == "style" else "사용자별"
+                    print(f"{type_name} 추천: {stats['count']}개 (사용자 {stats['users']}명, 상품 {stats['products']}개)")
+            
             print(f"결과 저장 경로: {result['output_dir']}")
         else:
             print("추천 결과가 없습니다.")
