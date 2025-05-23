@@ -1,0 +1,16 @@
+{
+  "model_type": "similars",
+  "default_params": {
+    "days": 30,
+    "top_n": 100,
+    "output_dir": "output",
+    "verbose": true
+  },
+  "similars_model": {
+    "similarity_threshold": 0.3,
+    "min_interactions": 2,
+    "max_cart_items": 20,
+    "use_category_filter": true,
+    "include_similar_categories": false
+  }
+}

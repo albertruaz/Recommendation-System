@@ -8,9 +8,9 @@ import uuid
 import pandas as pd
 from datetime import datetime
 from run.run_als import RunALS
-from run.run_recent_product import RunRecentProduct
+from run.run_similars import RunSimilars
 from utils.logger import setup_logger
-from utils.logger import log_als_model_results, log_recent_product_model_results
+from utils.logger import log_als_model_results, log_similars_model_results
 
 # 로거 설정
 logger = setup_logger('main')
@@ -34,16 +34,15 @@ def main():
     
     try:
         run_id = generate_run_id()
+        # logger.info("ALS 모듈 실행")
+        # als_runner = RunALS(run_id=run_id)
+        # result = als_runner.run()
+        # log_als_model_results(result)
         
-        logger.info("ALS 모듈 실행")
-        als_runner = RunALS(run_id=run_id)
-        result = als_runner.run()
-        log_als_model_results(result)
-        
-        logger.info("최근 본 상품과 유사한 상품 추천 실행")
-        recent_product_runner = RunRecentProduct(run_id=run_id)
-        result = recent_product_runner.run()
-        log_recent_product_model_results(result)
+        logger.info("장바구니 상품 유사도 기반 추천 실행")
+        similars_runner = RunSimilars(run_id=run_id)
+        result = similars_runner.run()
+        log_similars_model_results(result)
         
         return result
     except Exception as e:

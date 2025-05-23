@@ -5,7 +5,7 @@ ALS 기반 추천 시스템 실행 스크립트
 import os
 import json
 import pandas as pd
-from database.recommendation_db import RecommendationDB
+from database.db import RecommendationDB
 from database.excel_db import ExcelRecommendationDB
 
 from utils.logger import setup_logger

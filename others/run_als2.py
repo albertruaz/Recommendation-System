@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 import uuid
 from datetime import datetime
-from database.recommendation_db import RecommendationDB
+from database.db import db
 from model_als.pyspark_als import PySparkALS
 from utils.logger import setup_logger, overall_log
 from utils.recommendation_utils import save_recommendations
@@ -44,8 +44,8 @@ class RunALSTuning:
 
     def load_interactions(self) -> pd.DataFrame:
         """상호작용 데이터 로드"""
-        db = RecommendationDB()  
-        interactions = db.get_user_item_interactions(days=self.days, use_cache=True)
+        db_instance = db()  
+        interactions = db_instance.get_user_item_interactions(days=self.days, use_cache=True)
         
         if interactions.empty:
             self.logger.error(f"최근 {self.days}일 간의 상호작용 데이터가 없습니다.")

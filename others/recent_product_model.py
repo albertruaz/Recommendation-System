@@ -3,18 +3,21 @@
 
 사용자가 최근 장바구니에 넣은 상품들의 벡터를 기반으로 유사 상품을 추천합니다.
 벡터 DB 연결 및 검색 기능을 직접 구현합니다.
+
+[주의] 이 모델은 레거시 코드로, RunRecentProduct 클래스로 기능이 이전되었습니다.
 """
 
 import os
 import numpy as np
 import pandas as pd
 from typing import List, Dict, Tuple, Optional, Union
-from database.recommendation_db import RecommendationDB
+from database.recommendation_db import db
 import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sshtunnel import SSHTunnelForwarder
 from dotenv import load_dotenv
+import warnings
 
 # 환경 변수 로드
 load_dotenv()
@@ -30,6 +33,8 @@ class RecentProductModel:
         """
         최근 장바구니 상품 기반 추천 모델 초기화
         
+        [주의] 이 모델은 레거시 코드로, RunRecentProduct 클래스로 기능이 이전되었습니다.
+        
         Args:
             top_n: 사용자별 추천할 상품 수
             similarity_threshold: 유사도 임계값 (이 값 이상의 유사도를 가진 상품만 추천)
@@ -38,6 +43,13 @@ class RecentProductModel:
             use_category_filter: 카테고리 기반 필터링 사용 여부
             include_similar_categories: 비슷한 카테고리의 상품도 추천에 포함할지 여부
         """
+        warnings.warn(
+            "RecentProductModel 클래스는 레거시 코드로, RunRecentProduct 클래스로 기능이 이전되었습니다. "
+            "대신 run/run_recent_product.py의 RunRecentProduct 클래스를 사용하세요.", 
+            DeprecationWarning, 
+            stacklevel=2
+        )
+        
         self.top_n = top_n
         self.similarity_threshold = similarity_threshold
         self.min_interactions = min_interactions
@@ -45,7 +57,7 @@ class RecentProductModel:
         self.use_category_filter = use_category_filter
         self.include_similar_categories = include_similar_categories
         
-        self.db = RecommendationDB()
+        self.db = db()
         self.logger = logging.getLogger('recent_product_model')
         
         # 벡터 DB 연결 설정

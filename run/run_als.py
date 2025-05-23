@@ -8,8 +8,11 @@ import pandas as pd
 import numpy as np
 import uuid
 from datetime import datetime
-from database.recommendation_db import RecommendationDB
+from database.db_manager import DatabaseManager
+from database.db import db
+from model_als.base_als import BaseALS
 from model_als.pyspark_als import PySparkALS
+from model_als.implicit_als import ImplicitALS
 from utils.logger import setup_logger
 from utils.recommendation_utils import save_recommendations
 
@@ -52,8 +55,9 @@ class RunALS:
 
     def load_interactions(self) -> pd.DataFrame:
         """상호작용 데이터 로드"""
-        db = RecommendationDB()  
-        interactions = db.get_user_item_interactions(days=self.days, use_cache=True)
+        db_manager = DatabaseManager()
+        db_instance = db()
+        interactions = db_instance.get_user_item_interactions(days=self.days, use_cache=True)
         
         if interactions.empty:
             self.logger.error(f"최근 {self.days}일 간의 상호작용 데이터가 없습니다.")
@@ -117,8 +121,15 @@ class RunALS:
             return None
     
     def run(self):
-        """ALS 모델 실행 및 추천 생성"""
-        self.logger.info(f"Start ALS")
+        """ALS 모델을 실행하고 추천 결과를 생성합니다."""
+        start_time = datetime.now()
+        
+        # DB 연결
+        db_manager = DatabaseManager()
+        db_instance = db()
+
+        # 상호작용 데이터 가져오기
+        self.logger.info(f"상호작용 데이터를 가져옵니다. (기간: {self.days}일)")
         
         try:
             # 실행 ID 사용 (없는 경우 자동 생성)

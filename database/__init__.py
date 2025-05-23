@@ -5,7 +5,7 @@
 """
 
 from .db_manager import DatabaseManager
-from .recommendation_db import RecommendationDB
-from .vector_db import VectorDB
+from .db import db
+from .vector_db import vector_db
 
-__all__ = ['DatabaseManager', 'RecommendationDB', 'VectorDB'] 
+__all__ = ['DatabaseManager', 'db', 'vector_db'] 

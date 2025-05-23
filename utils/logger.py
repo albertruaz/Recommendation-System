@@ -79,9 +79,9 @@ def log_als_model_results(result):
     # overall_log 함수 호출 (모든 모델 타입에 공통)
     overall_log(run_id, train_result, test_result, model_config)
 
-def log_recent_product_model_results(result):
+def log_similars_model_results(result):
     """
-    최근 본 상품 모델 실행 결과를 로깅하는 함수
+    장바구니 상품 유사도 기반 추천 실행 결과를 로깅하는 함수
     """
     pass
 
