@@ -17,10 +17,10 @@ import os
 import gc
 import time
 
-from model_als.base_als import BaseALS
 from utils.spark_utils import SparkSingleton, safe_format, calculate_huber_loss, apply_prediction_cap, evaluate_model, calculate_validation_weighted_sum_spark
+from utils.logger import setup_logger
 
-class PySparkALS(BaseALS):
+class PySparkALS:
     """PySpark ALS 기반 추천 시스템 (Explicit Feedback)"""
     
     def __init__(self,
@@ -35,7 +35,10 @@ class PySparkALS(BaseALS):
                  split_test_data: bool = False,
                  nonnegative: bool = True,
                  cold_start_strategy: str = "nan"):
-        super().__init__(max_iter, reg_param, rank, random_state)
+        self.max_iter = max_iter
+        self.reg_param = reg_param
+        self.rank = rank
+        self.random_state = random_state
         self.interaction_weights = interaction_weights or {
             "impression1": 1.0,
             "impression2": 0.5,
@@ -55,6 +58,17 @@ class PySparkALS(BaseALS):
         self._session_created_internally = False  # 세션이 내부에서 생성되었는지 추적
         self.nonnegative = nonnegative  # 음수 예측 방지 여부
         self.cold_start_strategy = cold_start_strategy  # cold start 처리 방식
+        
+        # BaseALS에서 가져온 속성들
+        self.user_factors = None
+        self.item_factors = None
+        self.user2idx = {}
+        self.idx2user = []
+        self.item2idx = {}
+        self.idx2item = []
+        
+        # 로거 설정
+        self.logger = setup_logger('als')
     
     def _create_spark_session(self):
         """필요한 설정으로 SparkSession을 생성합니다"""
@@ -470,4 +484,103 @@ class PySparkALS(BaseALS):
         except Exception as e:
             self.logger.error(f"잠재 요인 추출 중 오류 발생: {str(e)}")
             # 오류 발생 시 빈 DataFrame 반환
-            return pd.DataFrame(columns=['member_id']), pd.DataFrame(columns=['product_id']) 
+            return pd.DataFrame(columns=['member_id']), pd.DataFrame(columns=['product_id'])
+
+    def _get_interaction_weight(self, row: pd.Series) -> float:
+        """상호작용 타입에 따른 가중치 반환
+        
+        Args:
+            row (pd.Series): 상호작용 데이터 행
+                필수 컬럼:
+                - interaction_type: 상호작용 타입 (impression1, impression2, view1, view2, like, cart, purchase)
+            
+        Returns:
+            float: 계산된 가중치
+        """
+        interaction_type = row["interaction_type"]
+        if interaction_type in self.interaction_weights:
+            return self.interaction_weights[interaction_type]
+        return 1.0
+
+    def _log_training_results(self, interactions_df: pd.DataFrame, top_k: int = 20) -> None:
+        """학습 결과를 분석하고 로그로 출력합니다.
+        
+        Args:
+            interactions_df (pd.DataFrame): 원본 상호작용 데이터
+            top_k (int): 출력할 상위 결과 개수
+        """
+        try:
+            # 원본 데이터에서 실제 가중치 정보 추출
+            analysis_df = interactions_df.copy()
+            analysis_df['actual_weight'] = analysis_df.apply(self._get_interaction_weight, axis=1)
+            
+            # 예측값 계산
+            predictions = []
+            for _, row in analysis_df.iterrows():
+                user_idx = self.user2idx[row['member_id']]
+                item_idx = self.item2idx[row['product_id']]
+                pred_score = np.dot(self.user_factors[user_idx], self.item_factors[item_idx])
+                predictions.append({
+                    'user_id': row['member_id'],
+                    'item_id': row['product_id'],
+                    'interaction_type': row['interaction_type'],
+                    'actual_weight': row['actual_weight'],
+                    'predicted_score': pred_score
+                })
+            
+            # 결과를 DataFrame으로 변환하고 정렬
+            result_df = pd.DataFrame(predictions)
+            result_df = result_df.sort_values('predicted_score', ascending=False)
+            
+            # 출력 디렉토리 생성
+            os.makedirs('output', exist_ok=True)
+            
+            # CSV 파일로 저장
+            output_path = 'output/weight_analysis.csv'
+            result_df.to_csv(output_path, index=False)
+            
+            # Matrix 정보 로깅
+            total_cells = len(self.user2idx) * len(self.item2idx)
+            filled_cells = len(interactions_df)
+            sparsity = (total_cells - filled_cells) / total_cells * 100
+            
+            self.logger.info("\n=== Matrix 정보 ===")
+            self.logger.info(f"Shape: ({len(self.user2idx)}, {len(self.item2idx)})")
+            self.logger.info(f"총 셀 수: {total_cells:,}")
+            self.logger.info(f"채워진 셀 수: {filled_cells:,}")
+            self.logger.info(f"Sparsity: {sparsity:.2f}%")
+            
+            # 상위 K개 결과 로깅 (actual_weight > 0인 것들 중에서)
+            self.logger.info("\n=== 상위 결과 가중치 비교 ===")
+            header = "Predicted Score | Actual Weight | Type        | User ID | Item ID"
+            self.logger.info(header)
+            self.logger.info("-" * len(header))
+            
+            count = 0
+            for _, row in result_df.iterrows():
+                if count >= top_k:
+                    break
+                    
+                if row['actual_weight'] > 0:
+                    self.logger.info(
+                        f"{row['predicted_score']:>14.2f} | "
+                        f"{row['actual_weight']:>12.2f} | "
+                        f"{row['interaction_type']:<10s} | "
+                        f"{row['user_id']:>7d} | "
+                        f"{row['item_id']:>7d}"
+                    )
+                    count += 1
+            
+            # 상호작용 타입별 통계
+            self.logger.info("\n=== 상호작용 타입별 통계 ===")
+            type_stats = result_df.groupby('interaction_type').agg({
+                'actual_weight': ['mean', 'min', 'max', 'count'],
+                'predicted_score': ['mean', 'min', 'max']
+            }).round(3)
+            
+            self.logger.info("\n" + str(type_stats))
+            self.logger.info(f"\n전체 분석 결과가 {output_path}에 저장되었습니다.")
+            
+        except Exception as e:
+            self.logger.error(f"학습 결과 분석 중 오류 발생: {str(e)}")
+            raise 

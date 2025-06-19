@@ -1,3 +1,0 @@
-"""
-ALS Model Package
-""" 

@@ -6,6 +6,5 @@
 
 from .db_manager import DatabaseManager
 from .db import db
-from .vector_db import vector_db
 
-__all__ = ['DatabaseManager', 'db', 'vector_db'] 
+__all__ = ['DatabaseManager', 'db'] 

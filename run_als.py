@@ -10,9 +10,7 @@ import uuid
 from datetime import datetime
 from database.db_manager import DatabaseManager
 from database.db import db
-from model_als.base_als import BaseALS
-from model_als.pyspark_als import PySparkALS
-from model_als.implicit_als import ImplicitALS
+from pyspark_als import PySparkALS
 from utils.logger import setup_logger
 from utils.recommendation_utils import save_recommendations
 
