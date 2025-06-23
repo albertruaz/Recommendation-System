@@ -9,16 +9,26 @@
     "interaction_weights": {
       "impression1": -1,
       "impression2": -2,
+      "impression3": -3,
       "view1": 2.0,
       "view2": 4.0,
+      "view3": 6.0,
       "like": 5.0,
       "cart": 7.0,
       "purchase": 10.0,
       "review": 10.0
+    },
+    "interaction_thresholds": {
+      "view1": 1,
+      "view2": 4,
+      "view3": 7,
+      "impression1": 1,
+      "impression2": 4,
+      "impression3": 7
     }
   },
   "default_params": {
-    "days": 30,
+    "days": 3,
     "top_n": 10,
     "output_dir": "output",
     "verbose": false
@@ -28,5 +38,10 @@
     "test_ratio": 0.1,
     "random_seed": 42,
     "calculate_loss": true
+  },
+  "database": {
+    "save_to_db": false,
+    "db_type": "postgres",
+    "enable_db_save": false
   }
 }

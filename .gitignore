@@ -65,3 +65,5 @@ tuning_output/
 .DS_Store
 .AppleDouble
 .LSOverride 
+
+output/

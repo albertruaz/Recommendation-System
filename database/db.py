@@ -12,6 +12,7 @@ from utils.logger import setup_logger
 import os
 from datetime import datetime
 from .db_manager import DatabaseManager
+import json
 
 class db:
     """추천 시스템을 위한 데이터베이스 유틸리티 클래스"""
@@ -23,6 +24,22 @@ class db:
         # 캐시 디렉토리 설정
         self.cache_dir = "cache/interactions"
         os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # config 로드
+        self.config = self._load_config()
+    
+    def _load_config(self):
+        """ALS config 파일을 로드합니다."""
+        try:
+            with open('als_config.json', 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            return config.get('pyspark_als', {}).get('interaction_thresholds', {})
+        except Exception as e:
+            self.logger.warning(f"Config 로드 실패: {str(e)}. 기본값을 사용합니다.")
+            return {
+                'view1': 3, 'view2': 6, 'view3': 10,
+                'impression1': 3, 'impression2': 6, 'impression3': 10
+            }
     
     def get_user_item_interactions(self, days: int = 1, use_cache: bool = True) -> pd.DataFrame:
         """
@@ -62,7 +79,6 @@ class db:
                 # 캐시 파일 로드 실패 시 DB에서 직접 가져오기로 진행
         
         try:
-            self.logger.info(f"DB에서 {days}일간의 상호작용 데이터를 가져옵니다.")
             query = """
                 WITH impression AS (
                     SELECT 
@@ -80,8 +96,9 @@ class db:
                         CAST(v.member_id AS UNSIGNED) as member_id,
                         CAST(v.product_id AS UNSIGNED) as product_id,
                         CASE 
-                            WHEN COUNT(DISTINCT v.id) >= 6 THEN 'view2'  -- 6회 이상 조회
-                            WHEN COUNT(DISTINCT v.id) >= 3 THEN 'view1'  -- 3회 이상 조회(6회 미만)
+                            WHEN COUNT(DISTINCT v.id) >= :view3_threshold THEN 'view3'  -- view3 이상 조회
+                            WHEN COUNT(DISTINCT v.id) >= :view2_threshold THEN 'view2'  -- view2 이상 조회
+                            WHEN COUNT(DISTINCT v.id) >= :view1_threshold THEN 'view1'  -- view1 이상 조회
                             ELSE NULL
                         END as interaction_type,
                         v.created_at
@@ -97,8 +114,9 @@ class db:
                         member_id,
                         product_id,
                         CASE 
-                            WHEN impression_count >= 6 THEN 'impression2'  -- 6회 이상 노출
-                            WHEN impression_count >= 3 THEN 'impression1'  -- 3회 이상 노출(6회 미만)
+                            WHEN impression_count >= :impression3_threshold THEN 'impression3'  -- impression3 이상 노출
+                            WHEN impression_count >= :impression2_threshold THEN 'impression2'  -- impression2 이상 노출
+                            WHEN impression_count >= :impression1_threshold THEN 'impression1'  -- impression1 이상 노출
                             ELSE NULL
                         END as interaction_type,
                         NULL as created_at
@@ -154,32 +172,33 @@ class db:
                 ORDER BY 
                     member_id,
                     product_id,
-                    FIELD(interaction_type, 'purchase', 'cart', 'like', 'view2', 'view1', 'impression2', 'impression1')
+                    FIELD(interaction_type, 'purchase', 'cart', 'like', 'view3', 'view2', 'view1', 'impression3', 'impression2', 'impression1')
             """
 
             with self.db_manager.mysql.get_connection() as conn:
-                start_time = datetime.now()
-                df = pd.read_sql(text(query), conn, params={'days': days})
-                end_time = datetime.now()
-                query_time = (end_time - start_time).total_seconds()
-                self.logger.info(f"DB 쿼리 완료. 소요 시간: {query_time:.2f}초")
-                
+                params = {
+                    'days': days,
+                    'view1_threshold': self.config.get('view1', 3),
+                    'view2_threshold': self.config.get('view2', 6),
+                    'view3_threshold': self.config.get('view3', 10),
+                    'impression1_threshold': self.config.get('impression1', 3),
+                    'impression2_threshold': self.config.get('impression2', 6),
+                    'impression3_threshold': self.config.get('impression3', 10)
+                }
+                df = pd.read_sql(text(query), conn, params=params)
                 df['member_id'] = pd.to_numeric(df['member_id'], errors='coerce').astype('Int64')
                 df['product_id'] = pd.to_numeric(df['product_id'], errors='coerce').astype('Int64')
                 df = df.dropna(subset=['member_id', 'product_id'])
                 
-                # 데이터 통계 로깅
+                
                 self.logger.info(f"총 {len(df)}개의 상호작용 데이터 로드 완료")
                 self.logger.info(f"고유 사용자 수: {df['member_id'].nunique()}")
                 self.logger.info(f"고유 상품 수: {df['product_id'].nunique()}")
-                
-                # 상호작용 타입별 통계
                 interaction_stats = df.groupby('interaction_type').size()
                 self.logger.info("\n상호작용 타입별 통계:")
                 for interaction_type, count in interaction_stats.items():
                     self.logger.info(f"- {interaction_type}: {count}건")
-                
-                # 캐시 파일 저장
+
                 if use_cache:
                     try:
                         df.to_csv(cache_file, index=False)
