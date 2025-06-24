@@ -1,37 +1,32 @@
 # 아래 패키지들은 conda environment로 설치됨
 # python==3.9.21
 
-# 수동 설치 필요 (pip install . 로 설치)
-# buffalo==2.0.5
-
-# 추천 시스템
-# implicit>=0.7.0
-# scipy>=1.15.0
-pyspark==3.5.1
-
-# 나머지 필수 패키지들
-numpy==1.24.3
-pandas==2.2.3
+# 추천 시스템 핵심 패키지
+pyspark==3.5.0
+pandas==2.0.3
+numpy==1.24.4
+scikit-learn==1.3.2
 scipy==1.10.1
-implicit==0.7.2
-h5py==3.9.0
-python-dotenv==1.1.0
-sqlalchemy==2.0.40
+
+# 데이터베이스 연결
+psycopg2-binary==2.9.10
+mysql-connector-python==9.0.0
 pymysql==1.1.1
-tqdm==4.67.1
-colorlog==6.9.0
-matplotlib==3.7.3  # 시각화 도구
-
-
-# 데이터베이스
-mysql-connector-python>=9.2.0
-PyMySQL>=1.1.0
-SQLAlchemy>=2.0.0
-
-# Vector DB 연결용 패키지
-psycopg2-binary>=2.9.9  # PostgreSQL 드라이버
-sshtunnel>=0.4.0  # SSH 터널링
+sqlalchemy==2.0.39
 
 # 유틸리티
-python-json-logger>=3.3.0
-wandb==0.16.5  # Weights & Biases for experiment tracking 
+python-dotenv==1.0.1
+pyyaml==6.0.2
+colorlog==4.7.2
+
+# 개발 도구
+pytest==8.3.5
+pytest-cov==5.0.0
+black==24.8.0
+flake8==7.1.2
+mypy==1.14.1
+
+# 시각화 (선택사항)
+matplotlib==3.7.5
+seaborn==0.13.2
+plotly==6.0.1
