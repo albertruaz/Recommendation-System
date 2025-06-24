@@ -5,6 +5,5 @@
 """
 
 from .db_manager import DatabaseManager
-from .db import db
 
-__all__ = ['DatabaseManager', 'db'] 
+__all__ = ['DatabaseManager'] 

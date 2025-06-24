@@ -65,40 +65,39 @@ class RecommendationService:
         return train_df, test_df
     
     def _generate_recommendations(self, top_n: int) -> pd.DataFrame:
-        """추천 생성"""
-        self.logger.info(f"추천 생성 시작 (top_n={top_n})")
+        """벡터화된 추천 생성 - O(N×M)에서 O(N+M)으로 개선"""
+        self.logger.info(f"벡터화된 추천 생성 시작 (top_n={top_n})")
         
         # 사용자-아이템 잠재 요인 가져오기
         user_factors, item_factors = self.model.get_factors()
         
-        recommendations = []
+        # 1. 모든 벡터를 한번에 numpy 배열로 변환
+        user_matrix = np.array([row['features'] for _, row in user_factors.iterrows()])  # (n_users, n_factors)
+        item_matrix = np.array([row['features'] for _, row in item_factors.iterrows()])  # (n_items, n_factors)
         
-        # 각 사용자에 대해 추천 생성
-        for _, user_row in user_factors.iterrows():
-            user_idx = user_row['id']
-            user_id = self.data_loader.idx2user[user_idx]
-            user_vector = np.array(user_row['features'])
-            
-            # 모든 아이템에 대한 점수 계산
-            scores = []
-            for _, item_row in item_factors.iterrows():
-                item_idx = item_row['id']
-                item_id = self.data_loader.idx2item[item_idx]
-                item_vector = np.array(item_row['features'])
-                
-                score = np.dot(user_vector, item_vector)
-                scores.append({
+        self.logger.info(f"매트릭스 크기: 사용자 {user_matrix.shape}, 아이템 {item_matrix.shape}")
+        
+        # 2. 매트릭스 곱셈으로 모든 점수를 한번에 계산 - 핵심 개선!
+        all_scores = np.dot(user_matrix, item_matrix.T)  # (n_users, n_items)
+        
+        # 3. 각 사용자별로 top-N 인덱스 추출
+        top_items_indices = np.argsort(all_scores, axis=1)[:, -top_n:]  # 상위 N개
+        
+        # 4. 결과 포맷팅
+        recommendations = []
+        for user_idx, top_items in enumerate(top_items_indices):
+            user_id = self.data_loader.idx2user[user_factors.iloc[user_idx]['id']]
+            for item_idx in reversed(top_items):  # 높은 점수부터
+                item_id = self.data_loader.idx2item[item_factors.iloc[item_idx]['id']]
+                score = all_scores[user_idx, item_idx]
+                recommendations.append({
                     'member_id': user_id,
                     'product_id': item_id,
-                    'predicted_rating': score
+                    'predicted_rating': float(score)
                 })
-            
-            # 상위 N개 선택
-            user_scores = sorted(scores, key=lambda x: x['predicted_rating'], reverse=True)[:top_n]
-            recommendations.extend(user_scores)
         
         recommendations_df = pd.DataFrame(recommendations)
-        self.logger.info(f"추천 생성 완료: {len(recommendations_df)}개")
+        self.logger.info(f"벡터화된 추천 생성 완료: {len(recommendations_df)}개")
         
         return recommendations_df
     

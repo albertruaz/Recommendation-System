@@ -101,8 +101,8 @@ class ALSModel:
         return user_factors, item_factors
     
     def cleanup(self):
-        """리소스 정리"""
+        """리소스 정리 - 메모리 누수 방지"""
         self.model = None
         if self.spark:
-            SparkSingleton.stop()
+            SparkSingleton.cleanup()  # 캐시 정리 포함
             self.spark = None 

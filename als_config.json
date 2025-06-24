@@ -28,7 +28,7 @@
     }
   },
   "default_params": {
-    "days": 3,
+    "days": 2,
     "top_n": 10,
     "output_dir": "output",
     "verbose": false

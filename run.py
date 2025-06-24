@@ -4,12 +4,8 @@
 모든 설정은 config 파일에서 관리되며, 단순하고 깔끔한 실행을 제공합니다.
 """
 
-import sys
-import os
-import pandas as pd
-import uuid
 import json
-from datetime import datetime
+import sys
 from services.recommendation_service import RecommendationService
 from services.db_service import DatabaseService
 from utils.logger import setup_logger
@@ -32,23 +28,20 @@ def _load_config(config_file: str) -> dict:
                 'cold_start_strategy': config['pyspark_als'].get('cold_start_strategy', 'nan')
             },
             'interaction_weights': config['pyspark_als']['interaction_weights'],
+            'interaction_thresholds': config['pyspark_als']['interaction_thresholds'],
             
             # 기본 파라미터
             'days': config['default_params']['days'],
             'top_n': config['default_params']['top_n'],
-            'output_dir': config['default_params']['output_dir'],
-            'verbose': config['default_params'].get('verbose', False),
             
             # 테스트 설정
             'split_test_data': config['testing']['split_test_data'],
             'test_ratio': config['testing']['test_ratio'],
             'random_seed': config['testing']['random_seed'],
-            'calculate_loss': config['testing'].get('calculate_loss', True),
             
             # DB 설정
             'save_to_db': config['database']['save_to_db'],
-            'db_type': config['database']['db_type'],
-            'enable_db_save': config['database']['enable_db_save']
+            'db_type': config['database']['db_type']
         }
         
     except FileNotFoundError:
@@ -67,20 +60,16 @@ class RecommendationRunner:
         
         # 설정 로드
         self.config = _load_config(self.config_file)
-        self.run_id = self.generate_run_id()
 
         # 서비스 초기화
         self.db_service = DatabaseService(
             db_type=self.config['db_type'],
-            interaction_weights=self.config['interaction_weights']
+            interaction_weights=self.config['interaction_weights'],
+            interaction_thresholds=self.config['interaction_thresholds']
         )
         self.recommendation_service = RecommendationService(self.config)
     
-    def generate_run_id(self) -> str:
-        """실행 ID 생성"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        unique_id = str(uuid.uuid4())[:8]
-        return f"{timestamp}_{unique_id}"
+
     
     def run(self):
         """추천 시스템 실행"""
