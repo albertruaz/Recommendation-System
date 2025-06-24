@@ -28,8 +28,8 @@
     }
   },
   "default_params": {
-    "days": 2,
-    "top_n": 10,
+    "days": 10,
+    "top_n": 100,
     "output_dir": "output",
     "verbose": false
   },

@@ -1,20 +1,15 @@
-"""
-PySpark ALS 모델 핵심 로직
-"""
-
 import numpy as np
 import pandas as pd
 from pyspark.sql import SparkSession
 from pyspark.ml.recommendation import ALS
 from pyspark.sql.types import FloatType
 from pyspark.sql.functions import udf
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 from utils.spark_utils import SparkSingleton
 from utils.logger import setup_logger
 
 
 class ALSModel:
-    """PySpark ALS 모델의 핵심 로직만 담당"""
     
     def __init__(self, 
                  max_iter: int = 10,
@@ -36,7 +31,6 @@ class ALSModel:
         self.logger = setup_logger('als_model')
     
     def init_spark(self):
-        """SparkSession 초기화"""
         if self.spark is None:
             self.spark = SparkSingleton.get(
                 app_name=f"ALS_Model", 
@@ -45,15 +39,12 @@ class ALSModel:
         return self.spark
     
     def train(self, train_df) -> None:
-        """ALS 모델 학습"""
         self.init_spark()
         
-        # Spark DataFrame으로 변환
         spark_df = self.spark.createDataFrame(
             train_df[['user_idx', 'item_idx', 'rating']]
         )
         
-        # ALS 모델 설정
         als = ALS(
             maxIter=self.max_iter,
             regParam=self.reg_param,
@@ -67,31 +58,25 @@ class ALSModel:
             seed=self.random_state
         )
         
-        # 학습
         self.logger.info("ALS 모델 학습 시작")
         self.model = als.fit(spark_df)
         self.logger.info("ALS 모델 학습 완료")
     
     def predict(self, test_df) -> pd.DataFrame:
-        """예측 생성"""
         if self.model is None:
             raise ValueError("모델이 학습되지 않았습니다.")
         
-        # Spark DataFrame으로 변환
         spark_test_df = self.spark.createDataFrame(
             test_df[['user_idx', 'item_idx', 'rating']]
         )
         
-        # 예측 생성
         predictions = self.model.transform(spark_test_df)
         
-        # pandas DataFrame으로 변환
         result_df = predictions.toPandas()
         
         return result_df
     
     def get_factors(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """사용자 및 아이템 잠재 요인 추출"""
         if self.model is None:
             raise ValueError("모델이 학습되지 않았습니다.")
             
@@ -100,9 +85,29 @@ class ALSModel:
         
         return user_factors, item_factors
     
+    def get_factors_optimized(self) -> Tuple[np.ndarray, np.ndarray, List, List]:
+        if self.model is None:
+            raise ValueError("모델이 학습되지 않았습니다.")
+        
+        self.logger.info("최적화된 factors 추출 시작 (Pandas 건너뛰기)")
+        
+        user_data = self.model.userFactors.collect()
+        item_data = self.model.itemFactors.collect()
+        
+        user_data_sorted = sorted(user_data, key=lambda x: x.id)
+        item_data_sorted = sorted(item_data, key=lambda x: x.id)
+        
+        user_ids = [row.id for row in user_data_sorted]
+        item_ids = [row.id for row in item_data_sorted]
+        user_matrix = np.array([list(row.features) for row in user_data_sorted])
+        item_matrix = np.array([list(row.features) for row in item_data_sorted])
+        
+        self.logger.info(f"최적화된 factors 추출 완료: 사용자 {user_matrix.shape}, 아이템 {item_matrix.shape}")
+        
+        return user_matrix, item_matrix, user_ids, item_ids
+    
     def cleanup(self):
-        """리소스 정리 - 메모리 누수 방지"""
         self.model = None
         if self.spark:
-            SparkSingleton.cleanup()  # 캐시 정리 포함
+            SparkSingleton.cleanup()
             self.spark = None 
