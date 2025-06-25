@@ -24,28 +24,26 @@ def setup_logger(name='recommendation'):
     
     logger.setLevel(logging.INFO)
     
-    # 콘솔 핸들러 생성
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+    # 로그 파일명에 타임스탬프 추가
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    logs_dir = "logs"
+    os.makedirs(logs_dir, exist_ok=True)
+    
+    log_file = os.path.join(logs_dir, f"{timestamp}.log")
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
     
     # 포맷터 생성
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+        datefmt='%H:%M:%S'
     )
-    console_handler.setFormatter(formatter)
+    file_handler.setFormatter(formatter)
     
     # 로거에 핸들러 추가
-    logger.addHandler(console_handler)
-    
-    # 파일 핸들러 추가 (logs 디렉토리)
-    logs_dir = "logs"
-    os.makedirs(logs_dir, exist_ok=True)
-    
-    log_file = os.path.join(logs_dir, f"{name}.log")
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
+    
+    # 다른 로거로의 전파 방지
+    logger.propagate = False
     
     return logger

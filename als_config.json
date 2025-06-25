@@ -1,47 +1,34 @@
 {
-  "model_type": "pyspark_als",
-  "pyspark_als": {
-    "max_iter": 10,
-    "reg_param": 0.1,
-    "rank": 10,
-    "nonnegative": false,
-    "cold_start_strategy": "nan",
-    "interaction_weights": {
-      "impression1": -1,
-      "impression2": -2,
-      "impression3": -3,
-      "view1": 2.0,
-      "view2": 4.0,
-      "view3": 6.0,
-      "like": 5.0,
-      "cart": 7.0,
-      "purchase": 10.0,
-      "review": 10.0
-    },
-    "interaction_thresholds": {
-      "view1": 1,
-      "view2": 4,
-      "view3": 7,
-      "impression1": 1,
-      "impression2": 4,
-      "impression3": 7
-    }
+  "max_iter": 10,
+  "reg_param": 0.1,
+  "rank": 10,
+  "nonnegative": false,
+  "cold_start_strategy": "nan",
+  "interaction_weights": {
+    "impression1": -1,
+    "impression2": -2,
+    "impression3": -3,
+    "view1": 2.0,
+    "view2": 4.0,
+    "view3": 6.0,
+    "like": 5.0,
+    "cart": 7.0,
+    "purchase": 10.0,
+    "review": 10.0
   },
-  "default_params": {
-    "days": 10,
-    "top_n": 100,
-    "output_dir": "output",
-    "verbose": false
+  "interaction_thresholds": {
+    "view1": 1,
+    "view2": 4,
+    "view3": 7,
+    "impression1": 1,
+    "impression2": 4,
+    "impression3": 7
   },
-  "testing": {
-    "split_test_data": true,
-    "test_ratio": 0.1,
-    "random_seed": 42,
-    "calculate_loss": true
-  },
-  "database": {
-    "save_to_db": false,
-    "db_type": "postgres",
-    "enable_db_save": false
-  }
+  "days": 10,
+  "top_n": 100,
+  "split_test_data": true,
+  "test_ratio": 0.1,
+  "random_seed": 42,
+  "save_to_db": false,
+  "db_type": "postgres"
 }

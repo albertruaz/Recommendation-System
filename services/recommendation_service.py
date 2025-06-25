@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, Tuple, Optional, TYPE_CHECKING
+from typing import Dict, Tuple, Optional, TYPE_CHECKING, List, Set
 from sklearn.model_selection import train_test_split
 
 if TYPE_CHECKING:
@@ -16,27 +16,25 @@ class RecommendationService:
         self.config = config
         self.logger = setup_logger('recommendation_service')
         
-        self.model = ALSModel(**config['model_params'])
-        
-        self.data_loader = None
+        model_params = {
+            'max_iter': config['max_iter'],
+            'reg_param': config['reg_param'],
+            'rank': config['rank'],
+            'nonnegative': config['nonnegative'],
+            'cold_start_strategy': config['cold_start_strategy']
+        }
+        self.model = ALSModel(**model_params)
     
-    def run_recommendation(self, ratings_df: pd.DataFrame) -> Dict:
+    def run_recommendation(self, ratings_df: pd.DataFrame) -> Dict[int, List[int]]:
         try:
             train_df, test_df = self._split_data(ratings_df)
-            
             self.model.train(train_df)
+            recommendations = self._generate_recommendations(top_n=self.config['top_n'])
             
-            recommendations = self._generate_recommendations(
-                top_n=self.config['top_n']
-            )
-            
-            evaluation_results = self._evaluate_model(test_df) if test_df is not None else None
-            if evaluation_results:
-                self.logger.info(f"평가 결과: {evaluation_results}")
+            if test_df is not None:
+                self._log_evaluation_results(test_df)
 
-            return {
-                'recommendations': recommendations
-            }
+            return recommendations
             
         except Exception as e:
             self.logger.error(f"추천 서비스 실행 중 오류: {str(e)}")
@@ -54,54 +52,30 @@ class RecommendationService:
             random_state=self.config.get('random_seed', 42)
         )
         
-        self.logger.info(f"데이터 분할 완료 - Train: {len(train_df)}, Test: {len(test_df)}")
+        self.logger.info("데이터 분할")
+        self.logger.info(f"학습 데이터: {len(train_df):,}개")
+        self.logger.info(f"테스트 데이터: {len(test_df):,}개")
+        
         return train_df, test_df
     
-    def _generate_recommendations(self, top_n: int) -> pd.DataFrame:
-        self.logger.info(f"최적화된 추천 생성 시작 (top_n={top_n})")
+    def _generate_recommendations(self, top_n: int) -> Dict[int, List[int]]:
+        self.logger.info("추천 생성")
         
-        user_matrix, item_matrix, user_ids, item_ids = self.model.get_factors_optimized()
+        recommendations = self.model.recommend_for_all_users(top_n)
         
-        self.logger.info(f"매트릭스 크기: 사용자 {user_matrix.shape}, 아이템 {item_matrix.shape}")
+        self.logger.info(f"생성된 추천: {len(recommendations):,}명의 사용자")
         
-        all_scores = user_matrix @ item_matrix.T
-        
-        top_items_indices = np.argpartition(all_scores, -top_n, axis=1)[:, -top_n:]
-        
-        for user_idx in range(len(top_items_indices)):
-            user_top_items = top_items_indices[user_idx]
-            user_scores = all_scores[user_idx, user_top_items]
-            sorted_order = np.argsort(user_scores)[::-1]
-            top_items_indices[user_idx] = user_top_items[sorted_order]
-        
-        recommendations = []
-        for user_idx, top_items in enumerate(top_items_indices):
-            user_id = self.data_loader.idx2user[user_ids[user_idx]]
-            for item_idx in top_items:
-                item_id = self.data_loader.idx2item[item_ids[item_idx]]
-                score = all_scores[user_idx, item_idx]
-                recommendations.append({
-                    'member_id': user_id,
-                    'product_id': item_id,
-                    'predicted_rating': float(score)
-                })
-        
-        recommendations_df = pd.DataFrame(recommendations)
-        self.logger.info(f"최적화된 추천 생성 완료: {len(recommendations_df)}개")
-        
-        return recommendations_df
+        return recommendations
     
-    def _evaluate_model(self, test_df: pd.DataFrame) -> Dict:
-        if test_df is None or test_df.empty:
-            return {}
-        
+    def _log_evaluation_results(self, test_df: pd.DataFrame) -> None:
+        """평가 결과를 로깅합니다."""
         try:
             predictions_df = self.model.predict(test_df)
-            
             valid_predictions = predictions_df.dropna(subset=['prediction'])
             
             if len(valid_predictions) == 0:
-                return {'mae': float('nan'), 'rmse': float('nan'), 'samples': 0}
+                self.logger.warning("유효한 예측 결과가 없습니다.")
+                return
             
             actual = valid_predictions['rating'].values
             predicted = valid_predictions['prediction'].values
@@ -109,13 +83,11 @@ class RecommendationService:
             mae = np.mean(np.abs(actual - predicted))
             rmse = np.sqrt(np.mean(np.square(actual - predicted)))
             
-            return {
-                'mae': float(mae),
-                'rmse': float(rmse),
-                'samples': len(valid_predictions)
-            }
+            self.logger.info("모델 평가 결과")
+            self.logger.info(f"평가 샘플 수: {len(valid_predictions):,}개")
+            self.logger.info(f"MAE: {mae:.4f}")
+            self.logger.info(f"RMSE: {rmse:.4f}")
             
         except Exception as e:
             self.logger.error(f"모델 평가 중 오류: {str(e)}")
-            return {}
     

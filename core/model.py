@@ -4,7 +4,7 @@ from pyspark.sql import SparkSession
 from pyspark.ml.recommendation import ALS
 from pyspark.sql.types import FloatType
 from pyspark.sql.functions import udf
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict
 from utils.spark_utils import SparkSingleton
 from utils.logger import setup_logger
 
@@ -58,9 +58,14 @@ class ALSModel:
             seed=self.random_state
         )
         
-        self.logger.info("ALS 모델 학습 시작")
+        self.logger.info("모델 학습")
+        self.logger.info("")
+        self.logger.info(f"반복 횟수\t\t: {self.max_iter}")
+        self.logger.info(f"잠재 요인 수\t\t: {self.rank}")
+        self.logger.info(f"정규화 계수\t\t: {self.reg_param}")
         self.model = als.fit(spark_df)
-        self.logger.info("ALS 모델 학습 완료")
+        self.logger.info("학습 완료")
+        self.logger.info("")
     
     def predict(self, test_df) -> pd.DataFrame:
         if self.model is None:
@@ -89,7 +94,8 @@ class ALSModel:
         if self.model is None:
             raise ValueError("모델이 학습되지 않았습니다.")
         
-        self.logger.info("최적화된 factors 추출 시작 (Pandas 건너뛰기)")
+        self.logger.info("행렬 분해 결과 추출")
+        self.logger.info("")
         
         user_data = self.model.userFactors.collect()
         item_data = self.model.itemFactors.collect()
@@ -102,10 +108,30 @@ class ALSModel:
         user_matrix = np.array([list(row.features) for row in user_data_sorted])
         item_matrix = np.array([list(row.features) for row in item_data_sorted])
         
-        self.logger.info(f"최적화된 factors 추출 완료: 사용자 {user_matrix.shape}, 아이템 {item_matrix.shape}")
+        self.logger.info(f"사용자 행렬\t\t: {user_matrix.shape}")
+        self.logger.info(f"아이템 행렬\t\t: {item_matrix.shape}")
+        self.logger.info("")
         
         return user_matrix, item_matrix, user_ids, item_ids
     
+    def recommend_for_all_users(self, n: int) -> Dict[int, List[int]]:
+        """
+        모든 사용자에 대해 상위 n개의 아이템을 추천합니다.
+        이미 상호작용한 아이템은 자동으로 제외됩니다.
+        """
+        
+        # Spark의 recommendForAllUsers 함수 사용
+        recommendations = self.model.recommendForAllUsers(n)
+        
+        # 결과를 딕셔너리로 변환 (점수는 제외하고 상품 ID만 포함)
+        result = {}
+        for row in recommendations.collect():
+            user_id = row.user_idx
+            items = [item.item_idx for item in row.recommendations]
+            result[user_id] = items
+            
+        return result
+
     def cleanup(self):
         self.model = None
         if self.spark:

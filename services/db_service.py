@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 from database.db_manager import DatabaseManager
 from utils.logger import setup_logger
 from sqlalchemy import text
@@ -15,14 +15,12 @@ from sqlalchemy import text
 class DatabaseService:
     """데이터베이스 로딩과 저장을 통합 처리하는 서비스"""
     
-    def __init__(self, db_type: str = "postgres", interaction_weights: Dict[str, float] = None, interaction_thresholds: Dict[str, int] = None):
-        self.db_type = db_type
+    def __init__(self, config: Dict):
+        self.config = config
+        self.db_type = config['db_type']
         self.db_manager = DatabaseManager()
-        self.interaction_weights = interaction_weights or {}
-        self.interaction_thresholds = interaction_thresholds or {
-            'view1': 3, 'view2': 6, 'view3': 10,
-            'impression1': 3, 'impression2': 6, 'impression3': 10
-        }
+        self.interaction_weights = config['interaction_weights']
+        self.interaction_thresholds = config['interaction_thresholds']
         self.logger = setup_logger('db_service')
         
         # 캐시 디렉토리 설정 (db 클래스에서 이동)
@@ -36,43 +34,23 @@ class DatabaseService:
         self.idx2item = {}
     
     # DataLoader 기능들을 통합 + db 클래스 기능 통합
-    def load_interactions(self, days: int = 30) -> pd.DataFrame:
-        """db 클래스의 get_user_item_interactions를 직접 구현"""
-        return self.get_user_item_interactions(days=days, use_cache=True)
-    
-    def get_user_item_interactions(self, days: int = 1, use_cache: bool = True) -> pd.DataFrame:
+    def load_interactions(self) -> pd.DataFrame:
         """
-        사용자-아이템 상호작용 데이터를 가져옵니다. (db 클래스에서 통합)
-        
-        Args:
-            days (int, optional): 최근 몇 일간의 데이터를 가져올지 지정
-            use_cache (bool, optional): 캐시 사용 여부
-            
-        Returns:
-            pd.DataFrame: 상호작용 데이터
+        사용자-아이템 상호작용 데이터를 가져옵니다.
         """
         today = datetime.now().strftime("%Y%m%d")
-        cache_file = os.path.join(self.cache_dir, f"interactions_{days}days_{today}.csv")
+        cache_file = os.path.join(self.cache_dir, f"interactions_{self.config['days']}days_{today}.csv")
         
         # 캐시 파일이 존재하고 사용 가능한 경우
-        if use_cache and os.path.exists(cache_file):
-            self.logger.info(f"캐시 파일 {cache_file}에서 데이터를 불러옵니다.")
+        if os.path.exists(cache_file):
             try:
                 df = pd.read_csv(cache_file)
                 df['member_id'] = pd.to_numeric(df['member_id'], errors='coerce').astype('Int64')
                 df['product_id'] = pd.to_numeric(df['product_id'], errors='coerce').astype('Int64')
                 
-                # 데이터 통계 로깅
-                self.logger.info(f"고유 사용자 수: {df['member_id'].nunique()}")
-                self.logger.info(f"고유 상품 수: {df['product_id'].nunique()}")
-                
-                # 상호작용 타입별 통계
-                interaction_stats = df.groupby('interaction_type').size()
-                self.logger.info("\n상호작용 타입별 통계:")
-                for interaction_type, count in interaction_stats.items():
-                    self.logger.info(f"- {interaction_type}: {count}건")
-                
+                self._log_interaction_stats(df)
                 return df
+                
             except Exception as e:
                 self.logger.warning(f"캐시 파일 로드 중 오류 발생: {str(e)}. DB에서 직접 데이터를 가져옵니다.")
         
@@ -175,7 +153,7 @@ class DatabaseService:
 
             with self.db_manager.mysql.get_connection() as conn:
                 params = {
-                    'days': days,
+                    'days': self.config['days'],
                     'view1_threshold': self.interaction_thresholds.get('view1', 3),
                     'view2_threshold': self.interaction_thresholds.get('view2', 6),
                     'view3_threshold': self.interaction_thresholds.get('view3', 10),
@@ -187,27 +165,35 @@ class DatabaseService:
                 df['member_id'] = pd.to_numeric(df['member_id'], errors='coerce').astype('Int64')
                 df['product_id'] = pd.to_numeric(df['product_id'], errors='coerce').astype('Int64')
                 df = df.dropna(subset=['member_id', 'product_id'])
-                
-                self.logger.info(f"총 {len(df)}개의 상호작용 데이터 로드 완료")
-                self.logger.info(f"고유 사용자 수: {df['member_id'].nunique()}")
-                self.logger.info(f"고유 상품 수: {df['product_id'].nunique()}")
-                interaction_stats = df.groupby('interaction_type').size()
-                self.logger.info("\n상호작용 타입별 통계:")
-                for interaction_type, count in interaction_stats.items():
-                    self.logger.info(f"- {interaction_type}: {count}건")
 
-                if use_cache:
-                    try:
-                        df.to_csv(cache_file, index=False)
-                        self.logger.info(f"상호작용 데이터가 캐시 파일 {cache_file}에 저장되었습니다.")
-                    except Exception as e:
-                        self.logger.warning(f"캐시 파일 저장 중 오류 발생: {str(e)}")
-                
+                self._log_interaction_stats(df)
+
+                # 캐시 저장
+                try:
+                    df.to_csv(cache_file, index=False)
+                    self.logger.info(f"캐시 파일 저장 완료: {cache_file}")
+                except Exception as e:
+                    self.logger.warning(f"캐시 파일 저장 중 오류 발생: {str(e)}")
+
                 return df
                 
         except Exception as e:
-            self.logger.error(f"데이터베이스에서 상호작용 데이터 가져오기 실패: {str(e)}")
+            self.logger.error(f"데이터 로드 중 오류 발생: {str(e)}")
             raise
+    
+    def _log_interaction_stats(self, df: pd.DataFrame) -> None:
+        """데이터 통계 정보를 로깅합니다."""
+        self.logger.info("데이터 통계")
+        self.logger.info(f"기간: {self.config['days']}일")
+        self.logger.info(f"전체 상호작용 수: {len(df):,}개")
+        self.logger.info(f"고유 사용자 수: {df['member_id'].nunique():,}명")
+        self.logger.info(f"고유 상품 수: {df['product_id'].nunique():,}개")
+        
+        # 상호작용 타입별 통계
+        self.logger.info("상호작용 타입별 통계")
+        interaction_stats = df.groupby('interaction_type').size()
+        for interaction_type, count in interaction_stats.items():
+            self.logger.info(f"{interaction_type}: {count:,}건")
     
     def prepare_indices(self, interactions_df: pd.DataFrame):
         """사용자 및 상품 ID를 연속적인 인덱스로 매핑"""
@@ -224,6 +210,7 @@ class DatabaseService:
     def transform_to_ratings(self, interactions_df: pd.DataFrame) -> pd.DataFrame:
         """메모리 효율적인 변환 - 불필요한 복사 방지"""
         # 새 컬럼만 추가하고 필요한 컬럼만 선택
+        self.prepare_indices(interactions_df)
         result = interactions_df.assign(
             rating=interactions_df['interaction_type'].map(self.interaction_weights),
             user_idx=interactions_df['member_id'].map(self.user2idx),
@@ -315,8 +302,16 @@ class DatabaseService:
                 )
             """
     
-
-
+    def convert_recommendations(self, recommendations: Dict[int, List[int]]) -> Dict[int, List[int]]:
+        """
+        인덱스 기반 추천 결과를 실제 ID로 변환합니다.
+        
+        """
+        return {
+            self.idx2user[user_idx]: [self.idx2item[item_idx] for item_idx in item_list]
+            for user_idx, item_list in recommendations.items()
+        }
+    
     def cleanup(self):
         """리소스 정리"""
         if self.db_manager:
