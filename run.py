@@ -31,15 +31,22 @@ class RecommendationRunner:
     def run(self):
         try:
             self._log_config_info()
-            
             interactions_df = self.db_service.load_interactions()
             ratings_df = self.db_service.transform_to_ratings(interactions_df)
-            
-            raw_recommendations = self.recommendation_service.run_recommendation(ratings_df)
-            results = self.db_service.convert_recommendations(raw_recommendations)
-            
+
+            recommendations = self.recommendation_service.run_recommendation(ratings_df)
+            results = self.db_service.convert_recommendations(recommendations)
             # self.db_service.save_recommendations(results)
 
+
+            import pandas as pd
+            recs_df = pd.DataFrame([
+                {'user_id': user_id, 'recommended_items': ','.join(map(str, items))}
+                for user_id, items in results.items()
+            ])
+            recs_df.to_csv('results.csv', index=False, encoding='utf-8')
+            self.logger.info("추천 결과를 results.csv 파일로 저장했습니다.")
+            
             return results
             
         except Exception as e:

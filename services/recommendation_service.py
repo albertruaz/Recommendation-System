@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Tuple, Optional, TYPE_CHECKING, List, Set
 from sklearn.model_selection import train_test_split
+from pyspark.sql.functions import collect_list
 
 if TYPE_CHECKING:
     from core.data_loader import DataLoader
@@ -29,7 +30,8 @@ class RecommendationService:
         try:
             train_df, test_df = self._split_data(ratings_df)
             self.model.train(train_df)
-            recommendations = self._generate_recommendations(top_n=self.config['top_n'])
+            
+            recommendations = self.model.recommend_for_all_users(self.config['top_n'], train_df)
             
             if test_df is not None:
                 self._log_evaluation_results(test_df)
@@ -58,14 +60,6 @@ class RecommendationService:
         
         return train_df, test_df
     
-    def _generate_recommendations(self, top_n: int) -> Dict[int, List[int]]:
-        self.logger.info("추천 생성")
-        
-        recommendations = self.model.recommend_for_all_users(top_n)
-        
-        self.logger.info(f"생성된 추천: {len(recommendations):,}명의 사용자")
-        
-        return recommendations
     
     def _log_evaluation_results(self, test_df: pd.DataFrame) -> None:
         """평가 결과를 로깅합니다."""

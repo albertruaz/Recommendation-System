@@ -3,7 +3,8 @@ import pandas as pd
 from pyspark.sql import SparkSession
 from pyspark.ml.recommendation import ALS
 from pyspark.sql.types import FloatType
-from pyspark.sql.functions import udf
+from pyspark.sql.functions import udf, col, row_number, collect_list
+from pyspark.sql.window import Window
 from typing import Tuple, Optional, List, Dict
 from utils.spark_utils import SparkSingleton
 from utils.logger import setup_logger
@@ -59,13 +60,11 @@ class ALSModel:
         )
         
         self.logger.info("모델 학습")
-        self.logger.info("")
-        self.logger.info(f"반복 횟수\t\t: {self.max_iter}")
-        self.logger.info(f"잠재 요인 수\t\t: {self.rank}")
-        self.logger.info(f"정규화 계수\t\t: {self.reg_param}")
+        self.logger.info(f"반복 횟수: {self.max_iter}")
+        self.logger.info(f"잠재 요인 수: {self.rank}")
+        self.logger.info(f"정규화 계수: {self.reg_param}")
         self.model = als.fit(spark_df)
         self.logger.info("학습 완료")
-        self.logger.info("")
     
     def predict(self, test_df) -> pd.DataFrame:
         if self.model is None:
@@ -95,7 +94,6 @@ class ALSModel:
             raise ValueError("모델이 학습되지 않았습니다.")
         
         self.logger.info("행렬 분해 결과 추출")
-        self.logger.info("")
         
         user_data = self.model.userFactors.collect()
         item_data = self.model.itemFactors.collect()
@@ -110,27 +108,46 @@ class ALSModel:
         
         self.logger.info(f"사용자 행렬\t\t: {user_matrix.shape}")
         self.logger.info(f"아이템 행렬\t\t: {item_matrix.shape}")
-        self.logger.info("")
         
         return user_matrix, item_matrix, user_ids, item_ids
     
-    def recommend_for_all_users(self, n: int) -> Dict[int, List[int]]:
+    def recommend_for_all_users(self, n: int, train_df: pd.DataFrame) -> Dict[int, List[int]]:
         """
         모든 사용자에 대해 상위 n개의 아이템을 추천합니다.
-        이미 상호작용한 아이템은 자동으로 제외됩니다.
-        """
+        핵심 로직: 학습 데이터 제외 + 예측 점수 기반 top-N 추출
         
-        # Spark의 recommendForAllUsers 함수 사용
-        recommendations = self.model.recommendForAllUsers(n)
-        
-        # 결과를 딕셔너리로 변환 (점수는 제외하고 상품 ID만 포함)
-        result = {}
-        for row in recommendations.collect():
-            user_id = row.user_idx
-            items = [item.item_idx for item in row.recommendations]
-            result[user_id] = items
+        Args:
+            n: 추천할 아이템 수
+            train_df: 학습에 사용된 데이터프레임 (user_idx, item_idx 컬럼 포함)
             
-        return result
+        Returns:
+            Dict[int, List[int]]: 사용자별 추천 아이템 딕셔너리
+        """
+        import heapq
+        from typing import Set
+        
+        self.logger.info(f"모든 사용자에 대해 top-{n} 추천 생성")
+        
+        # 1) 팩터·ID 가져오기
+        U, V, users, items = self.get_factors_optimized()  # U: (U×k), V: (I×k)
+
+        # 2) train_df → seen[user] = {item,…}
+        seen: Dict[int, Set[int]] = train_df.groupby('user_idx')['item_idx']\
+                                            .apply(set).to_dict()
+
+        # 3) item_id → V 행 인덱스 매핑
+        pos = {itm: i for i, itm in enumerate(items)}
+
+        recs: Dict[int, List[int]] = {}
+        for ui, u_id in enumerate(users):
+            scores = U[ui] @ V.T
+            for itm in seen.get(u_id, ()):
+                scores[pos[itm]] = -np.inf
+            topk = heapq.nlargest(n, range(len(scores)), key=scores.__getitem__)
+            recs[u_id] = [items[i] for i in topk]
+
+        self.logger.info(f"추천 생성 완료: {len(recs):,}명의 사용자")
+        return recs
 
     def cleanup(self):
         self.model = None
